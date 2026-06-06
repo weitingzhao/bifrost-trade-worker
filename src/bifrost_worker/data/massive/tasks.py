@@ -5,17 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
-
-_here = Path(__file__).resolve().parent
-_project_root = _here.parent.parent  # src/massive -> project root
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
 
 from bifrost_core.persistence.postgres.stock_ohlc_massive import timespan_to_stock_period
 from bifrost_worker.celery.celery_app import app  # noqa: E402

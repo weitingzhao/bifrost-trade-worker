@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from celery.schedules import crontab
-
 # Each entry: name, Celery task path, human label, note (for Ops /capabilities), crontab kwargs (UTC).
 MASSIVE_BEAT_SCHEDULE_SPEC: List[Dict[str, Any]] = [
     {
@@ -78,6 +76,8 @@ def beat_tasks_payload_for_capabilities() -> List[Dict[str, str]]:
 
 def build_celery_beat_schedule() -> Dict[str, Any]:
     """Return ``beat_schedule`` dict for ``app.conf.update(beat_schedule=...)``."""
+    from celery.schedules import crontab
+
     out: Dict[str, Any] = {}
     for spec in MASSIVE_BEAT_SCHEDULE_SPEC:
         name = str(spec["name"])
