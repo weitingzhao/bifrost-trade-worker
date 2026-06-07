@@ -70,6 +70,28 @@ def redis_quotes_connected(app: Any) -> bool:
     )
 
 
+def ib_edge_heartbeat_fields(app: Any) -> dict:
+    """``ib_connected`` / ``ib_client_id`` from Socket IB Redis health (no in-process IB socket)."""
+    rq = getattr(app, "_redis_quotes_reader", None)
+    if rq is None or not getattr(rq, "available", False):
+        return {"ib_connected": False, "ib_client_id": None}
+    r = getattr(rq, "redis_client", None)
+    if r is None:
+        return {"ib_connected": False, "ib_client_id": None}
+    cfg = getattr(app, "config", None) or getattr(app, "_config", None) or {}
+    try:
+        from bifrost_core.config.yaml_config import get_effective_ib_config
+        from bifrost_core.monitor.integrations.daemon_ib_edge import (
+            derive_daemon_ib_heartbeat_from_redis,
+        )
+
+        ib_cfg = get_effective_ib_config(cfg)
+        return derive_daemon_ib_heartbeat_from_redis(r, ib_cfg)
+    except Exception as e:
+        logger.debug("ib_edge_heartbeat_fields: %s", e)
+        return {"ib_connected": False, "ib_client_id": None}
+
+
 def listener_heartbeat_kwargs(app: Any) -> dict:
     """Legacy heartbeat columns; no in-process Listener."""
     return {
@@ -250,10 +272,11 @@ async def heartbeat(app: Any) -> None:
                 except Exception as e:
                     logger.debug("R-M6 contract_quote_live sync failed: %s", e)
             if hasattr(app._status_sink, "write_daemon_heartbeat"):
+                ib_kw = ib_edge_heartbeat_fields(app)
                 app._status_sink.write_daemon_heartbeat(
                     hedge_running=True,
-                    ib_connected=False,
-                    ib_client_id=None,
+                    ib_connected=bool(ib_kw.get("ib_connected")),
+                    ib_client_id=ib_kw.get("ib_client_id"),
                     heartbeat_interval_sec=effective_heartbeat_interval(app),
                     redis_quotes_connected=redis_quotes_connected(app),
                     mock_hedging=getattr(app, "mock_hedging", True),

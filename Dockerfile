@@ -6,7 +6,7 @@ ARG BIFROST_CORE_REF=main
 ARG GITHUB_ORG=YOUR_ORG
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libpq-dev git \
+    gcc libpq-dev git procps \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
