@@ -5,10 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
+
+_here = Path(__file__).resolve().parent
+_project_root = _here.parent.parent.parent.parent  # massive -> data -> bifrost_worker -> src -> repo root
 
 from bifrost_core.persistence.postgres.stock_ohlc_massive import timespan_to_stock_period
 from bifrost_worker.celery.celery_app import app  # noqa: E402
@@ -66,6 +71,20 @@ def _should_emit_ticker_ref_progress(processed: int, total: int, *, every: int =
     if processed >= total:
         return True
     return processed % every == 0
+
+
+def _load_financials_runners() -> Dict[str, Any]:
+    """SEPA fundamentals Celery runners (live in worker — no bifrost_api dependency)."""
+    from bifrost_worker.data.massive import financials_feed as _fd_massive_fin
+
+    return {
+        "feed_stocks_income_statements": _fd_massive_fin.run_feed_stocks_income_statements_job,
+        "feed_stocks_balance_sheets": _fd_massive_fin.run_feed_stocks_balance_sheets_job,
+        "feed_stocks_cash_flows": _fd_massive_fin.run_feed_stocks_cash_flows_job,
+        "feed_stocks_ratios": _fd_massive_fin.run_feed_stocks_ratios_job,
+        "feed_stocks_short_interest": _fd_massive_fin.run_feed_stocks_short_interest_job,
+        "feed_stocks_short_volume": _fd_massive_fin.run_feed_stocks_short_volume_job,
+    }
 
 
 def _config_path_for_task() -> Optional[str]:
@@ -1062,25 +1081,16 @@ def run_massive_job(self, job_id: int) -> Dict[str, Any]:
         params = _get_conn_params(status_cfg)
         conn = psycopg2.connect(**params)
         try:
-            # SEPA fundamentals → PostgreSQL. Route by *_fin_runners* keys — not only
-            # FEED_STOCKS_FINANCIALS_KINDS — so a stale worker frozenset cannot skip
-            # registered jobs (see unknown_kind: feed_stocks_balance_sheets in prod logs).
+            # SEPA fundamentals → PostgreSQL. Import runners only for financial kinds so
+            # stock-data workers without ``bifrost_api`` installed can run other Massive jobs.
             from bifrost_worker.data.massive.celery_queues import FEED_STOCKS_FINANCIALS_KINDS
-            from bifrost_api.research.sepa import financials_data as _fd_massive_fin
 
-            _fin_runners: Dict[str, Any] = {
-                "feed_stocks_income_statements": _fd_massive_fin.run_feed_stocks_income_statements_job,
-                "feed_stocks_balance_sheets": _fd_massive_fin.run_feed_stocks_balance_sheets_job,
-                "feed_stocks_cash_flows": _fd_massive_fin.run_feed_stocks_cash_flows_job,
-                "feed_stocks_ratios": _fd_massive_fin.run_feed_stocks_ratios_job,
-                "feed_stocks_short_interest": _fd_massive_fin.run_feed_stocks_short_interest_job,
-                "feed_stocks_short_volume": _fd_massive_fin.run_feed_stocks_short_volume_job,
-            }
-
-            if kind in _fin_runners:
-                result = _fin_runners[kind](conn, client, payload)
-                update_job_massive_backfill_result(status_cfg, job_id, "done", result)
-                return result
+            if kind in FEED_STOCKS_FINANCIALS_KINDS:
+                _fin_runners = _load_financials_runners()
+                if kind in _fin_runners:
+                    result = _fin_runners[kind](conn, client, payload)
+                    update_job_massive_backfill_result(status_cfg, job_id, "done", result)
+                    return result
 
             if kind == "feed_option_snapshots":
                 # Align with other kinds: payload.mode; snapshot_type kept as legacy alias.
@@ -2631,13 +2641,12 @@ def run_massive_job(self, job_id: int) -> Dict[str, Any]:
 
             all_known = sorted(MASSIVE_STOCKS_QUEUE_KINDS)
             in_fundamentals = kind in FEED_STOCKS_FINANCIALS_KINDS
-            in_fin_runners = kind in _fin_runners
 
             raise ValueError(
                 f"unknown kind: {kind!r}. "
-                f"kind_in_fin_runners={in_fin_runners}; "
+                f"kind_in_fin_runners={in_fundamentals}; "
                 f"kind_in_fundamentals_frozenset={in_fundamentals}; "
-                f"fin_runner_keys_this_worker={sorted(_fin_runners.keys())!r}; "
+                f"fin_runner_keys_this_worker={sorted(FEED_STOCKS_FINANCIALS_KINDS)!r}; "
                 f"massive_stocks_union_kinds_this_worker={all_known}. "
                 f"If this kind should exist, update run_massive_job in src/massive/tasks.py "
                 f"or restart workers after pulling code."
