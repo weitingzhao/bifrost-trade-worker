@@ -42,21 +42,57 @@ class AccountSyncDaemon:
         return r
 
     def _connect_pg(self) -> Any:
-        from bifrost_core.persistence.postgres.connection import _get_conn_params
+        from bifrost_core.persistence.postgres.connection import (
+            _get_conn_params,
+            _is_lock_timeout_error,
+            release_pg_locks_for_tables,
+        )
         from bifrost_core.persistence.postgres.ddl import _ensure_tables
 
         params = _get_conn_params(self._cfg)
-        conn = psycopg2.connect(**params)
-        with conn.cursor() as cur:
-            cur.execute("SET lock_timeout = '5s'")
-            cur.execute("SET idle_in_transaction_session_timeout = '60s'")
-        conn.commit()
-        _ensure_tables(conn)
-        logger.info(
-            "[AccountSync] PostgreSQL connected: %s@%s:%s/%s",
-            params["user"], params["host"], params["port"], params["dbname"],
-        )
-        return conn
+        last_err: Exception | None = None
+        for attempt in (1, 2, 3):
+            conn: Any = None
+            try:
+                conn = psycopg2.connect(**params)
+                with conn.cursor() as cur:
+                    cur.execute("SET lock_timeout = '5s'")
+                    cur.execute("SET idle_in_transaction_session_timeout = '60s'")
+                conn.commit()
+                try:
+                    _ensure_tables(conn)
+                except Exception as ddl_err:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    if _is_lock_timeout_error(ddl_err):
+                        # Another service (e.g. trading daemon) may be running DDL; schema usually exists.
+                        logger.warning(
+                            "[AccountSync] DDL ensure skipped (lock timeout); continuing with existing schema"
+                        )
+                    else:
+                        raise
+                logger.info(
+                    "[AccountSync] PostgreSQL connected: %s@%s:%s/%s",
+                    params["user"], params["host"], params["port"], params["dbname"],
+                )
+                return conn
+            except Exception as e:
+                last_err = e
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                if attempt < 3 and _is_lock_timeout_error(e):
+                    release_pg_locks_for_tables(self._cfg)
+                    time.sleep(0.5 * attempt)
+                    continue
+                raise
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("[AccountSync] PG connect failed without exception")
 
     def _ensure_pg(self) -> bool:
         if self.pg_conn is not None:
@@ -102,10 +138,25 @@ class AccountSyncDaemon:
         except Exception as e:
             logger.error("[AccountSync] Redis connect failed: %s", e)
             return
-        try:
-            self.pg_conn = self._connect_pg()
-        except Exception as e:
-            logger.error("[AccountSync] PG connect failed: %s", e)
+        pg_connected = False
+        for pg_attempt in range(1, 16):
+            try:
+                self.pg_conn = self._connect_pg()
+                pg_connected = True
+                break
+            except Exception as e:
+                logger.warning(
+                    "[AccountSync] PG connect attempt %s/15 failed: %s",
+                    pg_attempt,
+                    e,
+                )
+                if pg_attempt >= 15:
+                    logger.error("[AccountSync] PG connect failed after retries: %s", e)
+                    self._write_health(alive=False)
+                    return
+                await asyncio.sleep(min(2.0 * pg_attempt, 10.0))
+        if not pg_connected:
+            self._write_health(alive=False)
             return
 
         self._seed_run_status()

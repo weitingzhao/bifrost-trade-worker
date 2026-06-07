@@ -32,10 +32,13 @@ async def handle_connecting(app: Any) -> DaemonState:
 async def handle_connected(app: Any) -> DaemonState:
     """CONNECTED: fetch positions + spot, bootstrap TradingFSM (START/SYNCED). Transition to RUNNING."""
     if app._status_sink and hasattr(app._status_sink, "write_daemon_heartbeat"):
+        from bifrost_worker.daemon.app import control_heartbeat as _hb
+
+        ib_kw = _hb.ib_edge_heartbeat_fields(app)
         app._status_sink.write_daemon_heartbeat(
             hedge_running=False,
-            ib_connected=False,
-            ib_client_id=None,
+            ib_connected=bool(ib_kw.get("ib_connected")),
+            ib_client_id=ib_kw.get("ib_client_id"),
             heartbeat_interval_sec=app._effective_heartbeat_interval(),
             redis_quotes_connected=app._redis_quotes_connected(),
             mock_hedging=getattr(app, "mock_hedging", True),
@@ -82,11 +85,14 @@ async def handle_running(app: Any) -> DaemonState:
             app._build_heartbeat_minimal_dict(), append_history=False
         )
         if hasattr(app._status_sink, "write_daemon_heartbeat"):
+            from bifrost_worker.daemon.app import control_heartbeat as _hb
+
             listener_kw = app._listener_heartbeat_kwargs()
+            ib_kw = _hb.ib_edge_heartbeat_fields(app)
             app._status_sink.write_daemon_heartbeat(
                 hedge_running=True,
-                ib_connected=False,
-                ib_client_id=None,
+                ib_connected=bool(ib_kw.get("ib_connected")),
+                ib_client_id=ib_kw.get("ib_client_id"),
                 heartbeat_interval_sec=app._effective_heartbeat_interval(),
                 redis_quotes_connected=app._redis_quotes_connected(),
                 mock_hedging=getattr(app, "mock_hedging", True),
