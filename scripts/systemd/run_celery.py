@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Start Celery worker for IB bars backfill and Massive options / stock-reference jobs.
+"""Start Celery worker for bars backfill and Massive jobs (Ops subprocess / systemd).
 
-With ``--instance <profile>-<n>`` (e.g. ``stocks_ib-1``), queues come from ``ops.worker_profiles`` in config.
-Default (no ``--instance``): subscribes all queues in ``ops.celery.canonical_queue_order``.
+Usage:
+  python scripts/systemd/run_celery.py
+  python scripts/systemd/run_celery.py --instance stocks_ib-1
 """
 
 from __future__ import annotations
 
 import os
+import re
 import signal
 import sys
 import time
@@ -72,15 +74,10 @@ def _kill_existing_celery_workers(instance: str | None) -> None:
         sys.stderr.write(f"[run_celery] Warning: could not kill existing workers: {e}\n")
 
 
-_INSTANCE_PROFILE_RE = None
+_INSTANCE_PROFILE_RE = re.compile(r"^(?P<profile>[a-zA-Z0-9_]+)-(?P<seq>\d+)$")
 
 
 def _parse_instance_profile(instance_id: str) -> tuple[str | None, str | None]:
-    import re
-
-    global _INSTANCE_PROFILE_RE
-    if _INSTANCE_PROFILE_RE is None:
-        _INSTANCE_PROFILE_RE = re.compile(r"^(?P<profile>[a-zA-Z0-9_]+)-(?P<seq>\d+)$")
     m = _INSTANCE_PROFILE_RE.match(instance_id)
     if m:
         return m.group("profile"), m.group("seq")
@@ -97,7 +94,7 @@ def _resolve_queues_for_instance(instance: str | None, config_path: str) -> str:
 
     if instance is None:
         try:
-            cfg, _cfg_path = read_config(config_path)
+            cfg, _ = read_config(config_path)
         except Exception as exc:
             sys.stderr.write(
                 f"[run_celery] WARNING: cannot read {config_path}: {exc}; "
@@ -159,6 +156,7 @@ if __name__ == "__main__":
     import socket
 
     from bifrost_core.config.startup import read_config, resolve_startup_config_path
+    from bifrost_worker.celery.celery_app import app
     from bifrost_worker.celery.celery_queue_names import build_celery_worker_pool_argv
 
     argv_raw = sys.argv[1:]
@@ -187,8 +185,6 @@ if __name__ == "__main__":
         ops_celery=(cfg.get("ops") or {}).get("celery") or {},
     )
     sys.stderr.write(f"[run_celery] pool_argv={pool_argv}\n")
-
-    from bifrost_worker.celery.celery_app import app
 
     worker_argv = ["worker", "-l", "info", "-Q", queue_str, *pool_argv]
     if instance is not None:
