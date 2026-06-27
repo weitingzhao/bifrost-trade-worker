@@ -42,10 +42,13 @@ logger = logging.getLogger(__name__)
 
 
 def _redis_url_from_config() -> str:
-    """Build Redis URL from config (same redis as realtime quotes; use db 1 for Celery to avoid clash)."""
+    """Build Celery broker URL — ``redis_queue`` when configured, else legacy db=1 on ``redis`` host."""
+    explicit = (os.environ.get("CELERY_BROKER_URL") or os.environ.get("REDIS_URL") or "").strip()
+    if explicit:
+        return explicit
     try:
         from bifrost_core.config.startup import read_config
-        from bifrost_core.core.redis_url import effective_redis_dict, format_redis_url
+        from bifrost_core.core.redis_url import celery_redis_url_from_config
 
         config, _ = read_config()
     except Exception as e:
@@ -54,7 +57,7 @@ def _redis_url_from_config() -> str:
     r = config.get("redis") or {}
     if not r.get("enabled", True) and "enabled" in r:
         return "redis://127.0.0.1:6379/1"
-    return format_redis_url(effective_redis_dict(config, default_db=1))
+    return celery_redis_url_from_config(config)
 
 
 broker_url = _redis_url_from_config()
