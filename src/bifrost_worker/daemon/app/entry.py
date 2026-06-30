@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from bifrost_core.config.startup import read_config
 from bifrost_worker.daemon.app.gs_trading import GsTrading
+from bifrost_worker.daemon.lease import get_daemon_lease_settings, run_daemon_with_lease
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +61,8 @@ def _inject_structure_from_db_if_configured(config: dict) -> dict:
     return config
 
 
-async def _run_daemon_main(config_path: Optional[str] = None) -> None:
-    """Load config, register signals, run GsTrading. SIGTERM/SIGINT call app.stop() on main loop."""
-    config, resolved_path = read_config(config_path)
-    config = _inject_gates_from_db_if_configured(config)
-    config = _inject_structure_from_db_if_configured(config)
-    app = GsTrading(config, config_path=resolved_path)
+async def _run_gs_trading(app: GsTrading) -> None:
+    """Run GsTrading with signal handlers wired to app.stop()."""
     loop = asyncio.get_running_loop()
 
     def _on_stop_signal(*_args: Any) -> None:
@@ -77,7 +74,7 @@ async def _run_daemon_main(config_path: Optional[str] = None) -> None:
     try:
         loop.add_signal_handler(signal.SIGTERM, _on_stop_signal)
     except (NotImplementedError, OSError):
-        pass  # add_signal_handler not supported on Windows
+        pass
     try:
         loop.add_signal_handler(signal.SIGINT, _on_stop_signal)
     except (NotImplementedError, OSError):
@@ -85,13 +82,46 @@ async def _run_daemon_main(config_path: Optional[str] = None) -> None:
     try:
         await app.run()
     finally:
-        # So monitoring can show "Stopped at ..." (SIGTERM/SIGINT or consumed stop); no-op on SIGKILL
         if getattr(app, "_status_sink", None) and hasattr(
             app._status_sink, "write_daemon_graceful_shutdown"
         ):
             app._status_sink.write_daemon_graceful_shutdown()
 
 
+async def _run_daemon_main(config_path: Optional[str] = None) -> None:
+    """Load config, build GsTrading, run the FSM loop."""
+    config, resolved_path = read_config(config_path)
+    config = _inject_gates_from_db_if_configured(config)
+    config = _inject_structure_from_db_if_configured(config)
+    app = GsTrading(config, config_path=resolved_path)
+    await _run_gs_trading(app)
+
+
 def run_daemon(config_path: Optional[str] = None) -> None:
-    """Entry: run the gamma scalping daemon (SIGTERM/SIGINT stop)."""
-    asyncio.run(_run_daemon_main(config_path))
+    """Entry: run the gamma scalping daemon (SIGTERM/SIGINT stop).
+
+    When ``daemon.lease.enabled`` (or ``BIFROST_DAEMON_LEASE_ENABLED``) is set, only
+    the K8s Lease holder runs the FSM trading loop (R-DV3 single active auto-trade).
+    """
+    config, _resolved = read_config(config_path)
+    lease_settings = get_daemon_lease_settings(config)
+    app_holder: dict[str, GsTrading] = {}
+
+    async def _service() -> None:
+        config_loaded, resolved_path = read_config(config_path)
+        config_loaded = _inject_gates_from_db_if_configured(config_loaded)
+        config_loaded = _inject_structure_from_db_if_configured(config_loaded)
+        app = GsTrading(config_loaded, config_path=resolved_path)
+        app_holder["app"] = app
+        await _run_gs_trading(app)
+
+    def _on_leadership_lost() -> None:
+        app = app_holder.get("app")
+        if app is not None:
+            app.stop()
+
+    run_daemon_with_lease(
+        lease_settings,
+        _service,
+        on_stopped_leading=_on_leadership_lost,
+    )
