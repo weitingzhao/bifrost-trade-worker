@@ -16,7 +16,6 @@ from bifrost_worker.daemon.fsm.hedge_fsm import HedgeState
 from bifrost_worker.daemon.fsm.trading_fsm import TradingState
 from bifrost_worker.daemon.strategy.gamma_scalper import gamma_scalper_intent
 from bifrost_worker.daemon.strategy.hedge_gate import apply_hedge_gates
-from bifrost_worker.daemon.guards.order_safety import hard_block_ib_orders
 
 logger = logging.getLogger(__name__)
 
@@ -146,25 +145,9 @@ async def hedge(
             intent.quantity,
             cs.net_delta,
         )
-        app._fsm_hedge.on_order_placed()
-        app._fsm_hedge.on_ack_ok()
-        app.guard.record_hedge_sent()
-        app.store.set_last_hedge_time(now_ts)
-        app.store.set_last_hedge_price(spot)
-        app.store.inc_daily_hedge_count()
-        app._metrics.inc_hedge_count()
-        app._fsm_hedge.on_full_fill()
-        _write_op("fill")
-        if app._status_sink:
-            snap_dict = app._build_snapshot_dict(
-                snapshot, spot, cs, snapshot.data_lag_ms
-            )
-            app._status_sink.write_snapshot(snap_dict, append_history=True)
-        app._fsm_trading.apply_transition(TradingEvent.HEDGE_DONE, snapshot)
-        return
-    if getattr(app, "mock_hedging", True):
+    else:
         logger.info(
-            "[Daemon] Mock Hedging, not using IB: would %s %s shares (delta=%.1f)",
+            "[Daemon] Simulated hedge (read-only — no IB orders): would %s %s shares (delta=%.1f)",
             intent.side,
             intent.quantity,
             cs.net_delta,
@@ -173,84 +156,18 @@ async def hedge(
         log_order_status(
             order_status="mock_send", side=intent.side, quantity=intent.quantity
         )
-        app._fsm_hedge.on_order_placed()
-        app._fsm_hedge.on_ack_ok()
-        app.guard.record_hedge_sent()
-        app.store.set_last_hedge_time(now_ts)
-        app.store.set_last_hedge_price(spot)
-        app.store.inc_daily_hedge_count()
-        app._metrics.inc_hedge_count()
-        app._fsm_hedge.on_full_fill()
-        _write_op("fill")
-        if app._status_sink:
-            snap_dict = app._build_snapshot_dict(
-                snapshot, spot, cs, snapshot.data_lag_ms
-            )
-            app._status_sink.write_snapshot(snap_dict, append_history=True)
-        app._fsm_trading.apply_transition(TradingEvent.HEDGE_DONE, snapshot)
-        return
-    if getattr(app, "_hard_block_ib_orders", False) or hard_block_ib_orders():
-        logger.error(
-            "HARD_NO_ORDERS: refusing live IB order (%s %s %s)",
-            intent.side,
-            intent.quantity,
-            app.symbol,
-        )
-        app._fsm_hedge.on_ack_reject()
-        app._fsm_trading.apply_transition(TradingEvent.HEDGE_FAILED, snapshot)
-        return
     app._fsm_hedge.on_order_placed()
-    _write_op("order_sent")
-    log_order_status(
-        order_status="sent", side=intent.side, quantity=intent.quantity
-    )
-    trade_ok = False
-    op = getattr(app, "_operator_client", None)
-    if op is not None:
-        op_res = await op.request_async(
-            "place_stock_order",
-            {
-                "symbol": app.symbol,
-                "side": intent.side,
-                "quantity": intent.quantity,
-                "order_type": app.order_type,
-            },
-            caller="daemon",
+    app._fsm_hedge.on_ack_ok()
+    app.guard.record_hedge_sent()
+    app.store.set_last_hedge_time(now_ts)
+    app.store.set_last_hedge_price(spot)
+    app.store.inc_daily_hedge_count()
+    app._metrics.inc_hedge_count()
+    app._fsm_hedge.on_full_fill()
+    _write_op("fill")
+    if app._status_sink:
+        snap_dict = app._build_snapshot_dict(
+            snapshot, spot, cs, snapshot.data_lag_ms
         )
-        trade_ok = bool(op_res.get("ok"))
-        if not trade_ok:
-            logger.warning("IB Operator place_stock_order failed: %s", op_res.get("error"))
-    else:
-        logger.warning(
-            "Hedge order skipped: IB Operator client unavailable (configure operator / engine)"
-        )
-    if trade_ok:
-        app._fsm_hedge.on_ack_ok()
-        app.guard.record_hedge_sent()
-        app.store.set_last_hedge_time(now_ts)
-        app.store.set_last_hedge_price(spot)
-        app.store.inc_daily_hedge_count()
-        app._metrics.inc_hedge_count()
-        logger.info(
-            "Hedge sent: %s %s %s", intent.side, intent.quantity, app.symbol
-        )
-        app._fsm_hedge.on_full_fill()
-        _write_op("fill")
-        if app._status_sink:
-            snap_dict = app._build_snapshot_dict(
-                snapshot, spot, cs, snapshot.data_lag_ms
-            )
-            app._status_sink.write_snapshot(snap_dict, append_history=True)
-        app._fsm_trading.apply_transition(TradingEvent.HEDGE_DONE, snapshot)
-    else:
-        _write_op("reject", "order_failed")
-        if app._status_sink:
-            snap_dict = app._build_snapshot_dict(
-                snapshot, spot, cs, snapshot.data_lag_ms
-            )
-            app._status_sink.write_snapshot(snap_dict, append_history=True)
-        logger.warning("Order failed (trade is None or Operator error)")
-        app._fsm_hedge.on_ack_reject()
-        app._fsm_hedge.on_try_resync()
-        app._fsm_hedge.on_positions_resynced()
-        app._fsm_trading.apply_transition(TradingEvent.HEDGE_FAILED, snapshot)
+        app._status_sink.write_snapshot(snap_dict, append_history=True)
+    app._fsm_trading.apply_transition(TradingEvent.HEDGE_DONE, snapshot)
