@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from bifrost_core.config.startup import read_config
 from bifrost_worker.daemon.app.gs_trading import GsTrading
+from bifrost_worker.daemon.guards.order_safety import hard_block_ib_orders
 from bifrost_worker.daemon.lease import get_daemon_lease_settings, run_daemon_with_lease
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 def _inject_gates_from_db_if_configured(config: dict) -> dict:
     """When settings.active_gate_safety_strategy_id is set and postgres is configured, load gates from DB and merge into config. Returns config (possibly with config['gates'] overridden)."""
+    if hard_block_ib_orders():
+        logger.warning(
+            "[Daemon] BIFROST_DAEMON_HARD_NO_ORDERS set — skip DB gate_safety (file gates only)"
+        )
+        return config
     if not config or (config.get("sink") != "postgres" and not config.get("postgres")):
         return config
     try:

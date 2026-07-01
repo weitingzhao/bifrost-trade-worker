@@ -24,6 +24,7 @@ from bifrost_worker.daemon.fsm.trading_fsm import TradingFSM
 from bifrost_worker.daemon.market.market_data import MarketData
 from bifrost_core.portfolio.positions.position_book import PositionBook
 from bifrost_worker.daemon.guards.execution_guard import ExecutionGuard
+from bifrost_worker.daemon.guards.order_safety import apply_hard_order_block
 from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink
 from bifrost_core.persistence.status_sink import StatusSink
 from bifrost_core.core.realtime import create_reader_from_config
@@ -91,6 +92,7 @@ class GsTrading:
         # When True, hedge logic runs but no real IB order (log "Mock Hedging, not using IB"); for testing Resume/UI before live trading.
         self.mock_hedging = self._risk_cfg.get("mock_hedging", True)
         self.order_type = config.get("order", {}).get("order_type", "market")
+        apply_hard_order_block(self)
 
         # 1.d Hedge Configuration
         self._hedge_cfg = get_hedge_config(config)
@@ -185,6 +187,7 @@ class GsTrading:
             self.paper_trade = self._risk_cfg["paper_trade"]
         if "mock_hedging" in self._risk_cfg:
             self.mock_hedging = self._risk_cfg["mock_hedging"]
+        apply_hard_order_block(self)
         self.order_type = config.get("order", {}).get("order_type", self.order_type)
         self.guard.update_config(
             cooldown_sec=self._hedge_cfg["cooldown_sec"],
