@@ -24,12 +24,10 @@ from bifrost_worker.daemon.fsm.trading_fsm import TradingFSM
 from bifrost_worker.daemon.market.market_data import MarketData
 from bifrost_core.portfolio.positions.position_book import PositionBook
 from bifrost_worker.daemon.guards.execution_guard import ExecutionGuard
-from bifrost_worker.daemon.guards.order_safety import apply_hard_order_block
 from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink
 from bifrost_core.persistence.status_sink import StatusSink
 from bifrost_core.core.realtime import create_reader_from_config
 from bifrost_core.config.startup import read_config
-from bifrost_core.ib_operator.client import IbOperatorClient
 from bifrost_core.portfolio import accounts as _accounts
 from bifrost_worker.daemon.app import snapshot as _snapshot
 from bifrost_core.portfolio import symbol_position as _symbol_position
@@ -59,17 +57,12 @@ class GsTrading:
             except Exception as e:
                 logger.warning("PostgreSQL sink init failed: %s", e)
 
-        # 1.b No in-process IB: Redis (Ingestor + Account Agent) + IB Operator RPC for orders.
-        try:
-            self._operator_client = IbOperatorClient.from_merged_config(config)
-        except Exception as e:
-            logger.warning("IB Operator client init failed: %s", e)
-            self._operator_client = None
+        # 1.b No in-process IB: quotes and account state from Redis (Ingestor + Account Agent).
         self.connector = None
         self.listener_connector = None
         self.listener_connector_2 = None
         logger.info(
-            "Engine: no in-process IBConnector; data from Redis; orders via IB Operator"
+            "Engine: read-only IB edge — Redis quotes + account_agent; no order placement"
         )
 
         # Host account for hedging/market data (R-A4). Still from DB settings (not a client_id).
@@ -88,11 +81,8 @@ class GsTrading:
 
         # 1.c Active symbol is inferred from live positions; no fixed config symbol.
         self.symbol = ""
-        self.paper_trade = self._risk_cfg.get("paper_trade", True)
-        # When True, hedge logic runs but no real IB order (log "Mock Hedging, not using IB"); for testing Resume/UI before live trading.
-        self.mock_hedging = self._risk_cfg.get("mock_hedging", True)
-        self.order_type = config.get("order", {}).get("order_type", "market")
-        apply_hard_order_block(self)
+        self.paper_trade = True
+        self.mock_hedging = True
 
         # 1.d Hedge Configuration
         self._hedge_cfg = get_hedge_config(config)
@@ -183,12 +173,8 @@ class GsTrading:
         self._hedge_cfg = get_hedge_config(config)
         self._greeks_cfg = config.get("greeks", self._greeks_cfg)
         self._risk_cfg = get_risk_config(config)
-        if "paper_trade" in self._risk_cfg:
-            self.paper_trade = self._risk_cfg["paper_trade"]
-        if "mock_hedging" in self._risk_cfg:
-            self.mock_hedging = self._risk_cfg["mock_hedging"]
-        apply_hard_order_block(self)
-        self.order_type = config.get("order", {}).get("order_type", self.order_type)
+        self.paper_trade = True
+        self.mock_hedging = True
         self.guard.update_config(
             cooldown_sec=self._hedge_cfg["cooldown_sec"],
             max_daily_hedge_count=self._hedge_cfg["max_daily_hedge_count"],
