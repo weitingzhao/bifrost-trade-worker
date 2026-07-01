@@ -16,6 +16,7 @@ from bifrost_worker.daemon.fsm.hedge_fsm import HedgeState
 from bifrost_worker.daemon.fsm.trading_fsm import TradingState
 from bifrost_worker.daemon.strategy.gamma_scalper import gamma_scalper_intent
 from bifrost_worker.daemon.strategy.hedge_gate import apply_hedge_gates
+from bifrost_worker.daemon.guards.order_safety import hard_block_ib_orders
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,16 @@ async def hedge(
             )
             app._status_sink.write_snapshot(snap_dict, append_history=True)
         app._fsm_trading.apply_transition(TradingEvent.HEDGE_DONE, snapshot)
+        return
+    if getattr(app, "_hard_block_ib_orders", False) or hard_block_ib_orders():
+        logger.error(
+            "HARD_NO_ORDERS: refusing live IB order (%s %s %s)",
+            intent.side,
+            intent.quantity,
+            app.symbol,
+        )
+        app._fsm_hedge.on_ack_reject()
+        app._fsm_trading.apply_transition(TradingEvent.HEDGE_FAILED, snapshot)
         return
     app._fsm_hedge.on_order_placed()
     _write_op("order_sent")
