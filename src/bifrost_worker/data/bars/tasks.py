@@ -1,8 +1,8 @@
 """Celery tasks for bars backfill. Task updates job_bars_backfill row when done.
 
-By default bars workers use a long-lived :class:`~src.monitor.integrations.ib_clients.MarketIbClient`
-to TWS (``ib_client_id_worker_market``). IB Operator RPC is used only when
-``ib_operator.use_for_celery_bars: true`` (workers that cannot open a socket to TWS).
+Bars workers use :class:`~bifrost_worker.data.bars.ib_operator_transport.IbOperatorBarsAdapter`
+(Redis ``fetch_bars_range`` RPC via Platform IB Gateway). No direct TWS socket from worker
+processes (TIBM3).
 """
 
 from __future__ import annotations
@@ -163,11 +163,11 @@ async def _worker_connect_poll_loop() -> None:
             logger.debug("Worker connect poll: %s", e)
 
 
-# --- Worker process singleton: one asyncio loop in a daemon thread, one MarketIbClient in that loop ---
+# --- Worker process singleton: asyncio loop + IbOperatorBarsAdapter in loop thread ---
 _worker_loop: Optional[asyncio.AbstractEventLoop] = None
 _worker_loop_ready = threading.Event()
 _loop_lock = threading.Lock()
-_worker_ib_client: Any = None  # MarketIbClient, only used from loop thread
+_worker_ib_client: Any = None  # IbOperatorBarsAdapter, only used from loop thread
 _worker_ib_heartbeat_task: Any = None  # asyncio.Task for periodic status write
 _worker_last_bars_job_finished_ts: Optional[float] = None
 _worker_last_bars_job_interval_sec: float = 0.0
@@ -253,73 +253,37 @@ def _ensure_worker_loop() -> None:
 
 
 async def _get_or_create_bars_ib_client(control_cfg: Dict[str, Any]) -> Any:
-    """Return IB transport: MarketIbClient (default) or IbOperatorBarsAdapter if opted in."""
+    """Return Platform Gateway bars transport (IbOperatorBarsAdapter)."""
     global _worker_ib_client
     from bifrost_worker.data.bars.ib_operator_transport import IbOperatorBarsAdapter
     from bifrost_core.ib_operator.client import IbOperatorClient
     from bifrost_core.ib_operator.config import effective_ib_operator_settings
 
     op_settings = effective_ib_operator_settings(control_cfg)
-    use_operator_for_bars = bool(op_settings.get("use_for_celery_bars"))
-
-    gw = IbOperatorClient.from_merged_config(control_cfg) if use_operator_for_bars else None
-    if gw is not None:
-        if not isinstance(_worker_ib_client, IbOperatorBarsAdapter):
-            if _worker_ib_client is not None:
-                await _reset_worker_ib_client("switching to IB Operator transport for bars")
-            _worker_ib_client = IbOperatorBarsAdapter.from_merged_config(control_cfg, gw)
-            logger.info(
-                "Celery bars worker uses IB Operator (Redis) for historical bars "
-                "(ib_operator.use_for_celery_bars=true); no direct TWS socket from this process.",
-            )
-            _start_worker_ib_heartbeat(int(getattr(_worker_ib_client, "client_id", 0)))
-        return _worker_ib_client
-
-    if isinstance(_worker_ib_client, IbOperatorBarsAdapter):
-        await _reset_worker_ib_client(
-            "Switching from IB Operator to direct TWS (operator off or use_for_celery_bars=false)",
+    if not op_settings.get("enabled"):
+        raise RuntimeError(
+            "Celery bars requires ib_operator (Platform IB Gateway @ redis-ib); "
+            "direct TWS was removed in TIBM3."
         )
-    from bifrost_core.monitor.reader import StatusReader
-
-    reader = StatusReader(control_cfg)
-    ib_cfg = reader.get_ib_config() or {}
-    return await _get_or_create_worker_ib_client(ib_cfg)
-
-
-async def _get_or_create_worker_ib_client(ib_cfg: Dict[str, Any]) -> Any:
-    """Create or return the process-wide MarketIbClient. Must run inside worker loop."""
-    global _worker_ib_client
-    from bifrost_worker.data.bars.ib_operator_transport import IbOperatorBarsAdapter
-    from bifrost_core.monitor.integrations.ib_clients import MarketIbClient
-
-    if isinstance(_worker_ib_client, IbOperatorBarsAdapter):
-        await _reset_worker_ib_client("direct TWS path after operator adapter")
-    host = (ib_cfg.get("ib_host") or "127.0.0.1").strip()
-    port_type = (ib_cfg.get("ib_port_type") or "tws_paper").strip().lower()
-    port_map = {"tws_live": 7496, "tws_paper": 7497, "gateway": 4002}
-    port = port_map.get(port_type, 7497)
-    desired_client_id = int(ib_cfg.get("ib_client_id_worker_market", 500))
-    if _worker_ib_client is not None:
-        same_endpoint = (
-            getattr(_worker_ib_client, "host", None) == host
-            and getattr(_worker_ib_client, "port", None) == port
-            and int(getattr(_worker_ib_client, "client_id", desired_client_id)) == desired_client_id
+    if not op_settings.get("use_for_celery_bars"):
+        logger.warning(
+            "ib_operator.use_for_celery_bars=false is deprecated; "
+            "Celery bars always uses Platform Gateway RPC (TIBM3).",
         )
-        if same_endpoint and getattr(_worker_ib_client, "connected", False):
-            return _worker_ib_client
-        reason = "stale disconnected worker client"
-        if not same_endpoint:
-            reason = (
-                f"worker IB settings changed "
-                f"(host={host} port={port} client_id={desired_client_id})"
-            )
-        await _reset_worker_ib_client(reason)
-    _worker_ib_client = MarketIbClient(host=host, port=port, client_id=desired_client_id, name="CeleryBarsWorker")
-    await _worker_ib_client.ensure_connected()
-    actual_client_id = int(getattr(_worker_ib_client, "client_id", desired_client_id))
-    _write_worker_ib_status(True, actual_client_id)
-    _start_worker_ib_heartbeat(actual_client_id)
-    logger.info("Celery worker IB client connected (host=%s port=%s client_id=%s), will reuse for subsequent jobs", host, port, actual_client_id)
+
+    gw = IbOperatorClient.from_merged_config(control_cfg)
+    if gw is None:
+        raise RuntimeError("IbOperatorClient unavailable — check redis_ib / ib_operator config")
+
+    if not isinstance(_worker_ib_client, IbOperatorBarsAdapter):
+        if _worker_ib_client is not None:
+            await _reset_worker_ib_client("switching to IB Operator transport for bars")
+        _worker_ib_client = IbOperatorBarsAdapter.from_merged_config(control_cfg, gw)
+        logger.info(
+            "Celery bars worker uses IB Operator fetch_bars_range via Platform Gateway; "
+            "no direct TWS socket from this process.",
+        )
+        _start_worker_ib_heartbeat(int(getattr(_worker_ib_client, "client_id", 0)))
     return _worker_ib_client
 
 
@@ -472,25 +436,22 @@ async def _run_backfill_in_loop(
             _worker_last_bars_job_finished_ts = __import__("time").time()
             _worker_last_bars_job_interval_sec = float(api_interval_sec) if api_interval_sec is not None and api_interval_sec > 0 else 0.0
             return result
-        except IBConnectionDroppedError as e:
+        except (IBConnectionDroppedError, RuntimeError) as e:
             last_disconnect_error = e
             logger.warning(
-                "Bars task job_id=%s IB connection dropped on attempt %s/2: %s",
+                "Bars task job_id=%s IB transport failed on attempt %s/2: %s",
                 job_id,
                 attempt,
                 e,
             )
-            from bifrost_worker.data.bars.ib_operator_transport import IbOperatorBarsAdapter
-
-            if not isinstance(_worker_ib_client, IbOperatorBarsAdapter):
-                await _reset_worker_ib_client(f"connection dropped during backfill job_id={job_id}")
+            await _reset_worker_ib_client(f"transport failure during backfill job_id={job_id}")
             if attempt < 2:
                 continue
             break
 
     result = {
         "ok": False,
-        "error": f"Worker IB connection dropped during backfill and reconnect retry failed: {last_disconnect_error}",
+        "error": f"Worker IB transport failed during backfill and retry failed: {last_disconnect_error}",
     }
     update_job_bars_backfill_result(status_cfg, job_id, "failed", result)
     _worker_last_bars_job_finished_ts = __import__("time").time()
