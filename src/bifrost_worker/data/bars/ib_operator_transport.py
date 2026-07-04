@@ -1,4 +1,4 @@
-"""Celery bars backfill via IB Operator (Redis RPC) when ``ib_operator.use_for_celery_bars`` is true."""
+"""Celery bars backfill via Platform IB Gateway (Redis RPC fetch_bars_range)."""
 
 from __future__ import annotations
 

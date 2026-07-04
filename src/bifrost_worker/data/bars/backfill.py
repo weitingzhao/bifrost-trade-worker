@@ -4,11 +4,12 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
 from bifrost_worker.data.bars.ib_errors import IBConnectionDroppedError
 
 if TYPE_CHECKING:
     from bifrost_core.monitor.reader import StatusReader
-    from bifrost_core.monitor.integrations.ib_clients import MarketIbClient
+    from bifrost_worker.data.bars.ib_operator_transport import IbOperatorBarsAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ def build_backfill_preview(
 
 async def run_one_backfill(
     reader: "StatusReader",
-    ib_client: Optional["MarketIbClient"],
+    ib_client: Optional["IbOperatorBarsAdapter"],
     control_via_db: Optional[dict],
     symbol: str,
     period: str,
