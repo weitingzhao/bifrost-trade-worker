@@ -33,9 +33,9 @@ class AccountSyncDaemon:
         self._stop_event = asyncio.Event()
 
     def _connect_redis(self) -> Any:
-        from bifrost_core.core.redis_url import effective_redis_dict, format_redis_url
+        from bifrost_core.core.redis_url import effective_ib_redis_dict, format_redis_url
 
-        url = format_redis_url(effective_redis_dict(self._cfg, default_db=0))
+        url = format_redis_url(effective_ib_redis_dict(self._cfg, default_db=0))
         r = redis_lib.from_url(url, decode_responses=True)
         r.ping()
         logger.info("[AccountSync] Redis connected: %s", url.split("@")[-1] if "@" in url else url)
