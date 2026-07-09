@@ -232,6 +232,46 @@ def get_celery_workers_ping(timeout: float = CELERY_INSPECT_TIMEOUT_SEC) -> list
         return []
 
 
+def get_celery_workers_from_presence(
+    broker_url: Optional[str] = None,
+) -> list[str]:
+    """Fast worker list via ``bifrost:ops:worker_presence:*`` (no Celery inspect RPC)."""
+    url = broker_url or _redis_url_from_config()
+    if not url:
+        return []
+    try:
+        import redis
+
+        r = redis.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=3,
+        )
+        cur = 0
+        names: list[str] = []
+        seen: set[str] = set()
+        match = f"{OPS_WORKER_PRESENCE_KEY_PREFIX}*"
+        while True:
+            cur, batch = r.scan(cursor=cur, match=match, count=256)
+            for key in batch:
+                if not isinstance(key, str) or not key.startswith(OPS_WORKER_PRESENCE_KEY_PREFIX):
+                    continue
+                wid = key[len(OPS_WORKER_PRESENCE_KEY_PREFIX) :].strip()
+                if not wid or wid in seen:
+                    continue
+                if not r.get(key):
+                    continue
+                seen.add(wid)
+                names.append(wid)
+            if cur == 0:
+                break
+        return sorted(names)
+    except Exception as e:
+        logger.info("get_celery_workers_from_presence failed: %s", e)
+        return []
+
+
 class _RedisStreamLogHandler(logging.Handler):
     """Logging handler that pushes each log record to a Redis Stream for UI console tail.
 

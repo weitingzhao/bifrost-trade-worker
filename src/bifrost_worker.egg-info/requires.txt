@@ -6,3 +6,6 @@ flower>=2.0.0
 pytest>=7.0
 pytest-asyncio>=0.21
 ruff>=0.1.0
+
+[k8s]
+kubernetes>=27.0

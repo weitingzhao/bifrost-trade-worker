@@ -12,6 +12,8 @@ Provides-Extra: dev
 Requires-Dist: pytest>=7.0; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.21; extra == "dev"
 Requires-Dist: ruff>=0.1.0; extra == "dev"
+Provides-Extra: k8s
+Requires-Dist: kubernetes>=27.0; extra == "k8s"
 Dynamic: license-file
 
 # bifrost-trade-worker
