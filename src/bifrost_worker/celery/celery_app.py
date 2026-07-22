@@ -7,7 +7,8 @@ Usage:
 
 Or: python scripts/systemd/run_celery.py [config_path]  # pool from profile; sets BIFROST_CELERY_QUEUES
 
-Celery Beat (Massive schedules): python scripts/init/run_celery_beat.py
+Celery Beat (Massive schedules): python scripts/run_celery_beat.py
+  (K8s may use: celery -A bifrost_worker.celery.celery_app beat --loglevel=info)
 
 ``stocks_ib``: solo pool, one IB connection (client_id). Massive profiles: solo by default (see ``build_celery_worker_pool_argv``).
 Stop-poll runs in worker_init (solo) or worker_process_init (prefork) so Stop button works.
