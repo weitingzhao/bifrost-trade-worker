@@ -211,5 +211,6 @@ class AccountSyncDaemon:
                     "updated_at": str(time.time()),
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            # Common cause: redis-ib ACL missing ~bifrost:health:daemon_* (trade-dev is read-only).
+            logger.warning("[AccountSync] write_health failed: %s", e)
