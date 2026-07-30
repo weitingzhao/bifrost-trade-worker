@@ -1,12 +1,9 @@
-"""Compare stock_day coverage against a NYSE-oriented trading-day calendar in PostgreSQL.
+"""Compare market.stock_daily coverage against a NYSE-oriented trading-day calendar.
 
 ``ref`` is ``generate_series`` from the symbol's effective start through the cap date,
 excluding weekends and full-closure rows in ``public.reference_us_holidays``
 (``exchange='NYSE'`` AND ``status IS NULL OR status='closed'``). Early-close days
 (``status='early-close'``) are still expected to have a daily bar.
-
-Holiday rows are populated by the SEPA Data Ready page Step 1 (Massive sync) and
-the legacy seed ``scripts/db/reference_us_holidays_nyse_2020_2024.sql``.
 """
 
 from __future__ import annotations
@@ -19,10 +16,9 @@ def _gap_ctes_sql(ref_end_sql: str, cap_filter_sql: str) -> str:
     """Shared WITH block: sym_first, effective_start, ref (calendar), covered."""
     return f"""
         WITH sym_first AS (
-          SELECT MIN(bar_time) AS first_bar
-          FROM stock_day
-          WHERE source = 'massive'
-            AND UPPER(TRIM(symbol)) = %(symbol)s
+          SELECT MIN(bar_date) AS first_bar
+          FROM market.stock_daily
+          WHERE UPPER(TRIM(symbol)) = %(symbol)s
         ),
         effective_start AS (
           SELECT GREATEST(
@@ -32,7 +28,7 @@ def _gap_ctes_sql(ref_end_sql: str, cap_filter_sql: str) -> str:
           ) AS ts
         ),
         ref AS (
-          SELECT s::date AS bar_time
+          SELECT s::date AS bar_date
           FROM generate_series(
             (SELECT (ts::date) FROM effective_start),
             {ref_end_sql},
@@ -46,11 +42,10 @@ def _gap_ctes_sql(ref_end_sql: str, cap_filter_sql: str) -> str:
             )
         ),
         covered AS (
-          SELECT DISTINCT bar_time
-          FROM stock_day
-          WHERE source = 'massive'
-            AND UPPER(TRIM(symbol)) = %(symbol)s
-            AND bar_time >= (SELECT ts FROM effective_start)
+          SELECT DISTINCT bar_date
+          FROM market.stock_daily
+          WHERE UPPER(TRIM(symbol)) = %(symbol)s
+            AND bar_date >= (SELECT ts FROM effective_start)
             {cap_filter_sql}
         )"""
 
@@ -61,18 +56,7 @@ def compute_stock_day_gap(
     lookback_years: int = 10,
     cap_date: Optional[date] = None,
 ) -> Dict[str, Any]:
-    """Compare stock_day bar coverage for *symbol* against the reference trading calendar.
-
-    Gap logic:
-      ref     = each weekday from effective_start through ref_end, excluding
-                ``reference_us_holidays`` (exchange='NYSE') and weekends.
-      covered = DISTINCT bar_time for this symbol in the same window
-      gap     = ref_total - covered_total
-
-    cap_date should be passed as the last safely-closed trading date
-    (i.e. yesterday when the NYSE session is still open, today once it has closed).
-    This prevents today's bar from appearing as a phantom gap when the session
-    is still in progress and the bar cannot yet be reliably fetched.
+    """Compare ``market.stock_daily`` bar coverage for *symbol* against the reference calendar.
 
     Returns a dict compatible with StockDayGapResult (frontend).
     """
@@ -82,7 +66,7 @@ def compute_stock_day_gap(
 
     compared_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    cap_filter_sql = "AND bar_time::date <= %(cap_date)s" if cap_date else ""
+    cap_filter_sql = "AND bar_date <= %(cap_date)s" if cap_date else ""
     sql_params: Dict[str, Any] = {"years": lookback_years, "symbol": sym}
     if cap_date:
         sql_params["cap_date"] = cap_date.isoformat()
@@ -92,8 +76,6 @@ def compute_stock_day_gap(
 
     ctes = _gap_ctes_sql(ref_end_sql, cap_filter_sql)
 
-    # ── Query A: ref total vs covered total ───────────────────────────────────
-    # effective_start clips pre-IPO dates (first known bar for this symbol).
     cur.execute(
         f"""
         {ctes}
@@ -110,15 +92,12 @@ def compute_stock_day_gap(
     has_rows = covered_total > 0
 
     if ref_total == 0:
-        cur.execute(
-            "SELECT EXISTS(SELECT 1 FROM stock_day WHERE source = %s LIMIT 1)",
-            ("massive",),
-        )
+        cur.execute("SELECT EXISTS(SELECT 1 FROM market.stock_daily LIMIT 1)")
         ex_row = cur.fetchone()
-        db_has_massive = bool(ex_row and ex_row[0])
+        db_has = bool(ex_row and ex_row[0])
         message = (
-            "No stock_day rows with source='massive' in the database yet."
-            if not db_has_massive
+            "No market.stock_daily rows in the database yet."
+            if not db_has
             else "No trading days fall in the computed window (effective start after ref end)."
         )
         return {
@@ -142,18 +121,17 @@ def compute_stock_day_gap(
     else:
         coverage_pct = 100.0
 
-    # ── Query B: missing by year (same effective_start + ref calendar) ──────
     cur.execute(
         f"""
         {ctes}
         SELECT
-          EXTRACT(YEAR FROM r.bar_time)::int AS year,
+          EXTRACT(YEAR FROM r.bar_date)::int AS year,
           COUNT(*)::bigint                   AS count,
-          MIN(r.bar_time)::text              AS first_missing,
-          MAX(r.bar_time)::text              AS last_missing
+          MIN(r.bar_date)::text              AS first_missing,
+          MAX(r.bar_date)::text              AS last_missing
         FROM ref r
-        LEFT JOIN covered c USING (bar_time)
-        WHERE c.bar_time IS NULL
+        LEFT JOIN covered c USING (bar_date)
+        WHERE c.bar_date IS NULL
         GROUP BY year
         ORDER BY year DESC
         """,
@@ -189,10 +167,7 @@ def compute_stock_day_quality_detail(
     symbol: str,
     days: int = 90,
 ) -> Dict[str, Any]:
-    """Return per-day OHLC / volume / VWAP completeness for a symbol.
-
-    Returns a dict compatible with StockDayQualityDetailResponse (frontend).
-    """
+    """Return per-day OHLC / volume / VWAP completeness for a symbol from ``market.stock_daily``."""
     sym = (symbol or "").strip().upper()
     if not sym:
         return {"ok": False, "symbol": "", "latest_date": None, "daily": [], "error": "symbol is required"}
@@ -200,37 +175,31 @@ def compute_stock_day_quality_detail(
     cur.execute(
         """
         SELECT
-          bar_time::text                                                        AS bar_date,
+          bar_date::text                                                        AS bar_date,
           CASE WHEN open IS NOT NULL AND high IS NOT NULL
                     AND low  IS NOT NULL AND close IS NOT NULL
                THEN 100.0 ELSE 0.0 END                                         AS ohlc_pct,
           CASE WHEN volume IS NOT NULL THEN 100.0 ELSE 0.0 END                 AS volume_pct,
           CASE WHEN vwap   IS NOT NULL THEN 100.0 ELSE 0.0 END                 AS vwap_pct
-        FROM stock_day
-        WHERE source = 'massive'
-          AND UPPER(TRIM(symbol)) = %(symbol)s
-          AND bar_time >= CURRENT_DATE - (%(days)s || ' days')::interval
-        ORDER BY bar_time DESC
+        FROM market.stock_daily
+        WHERE UPPER(TRIM(symbol)) = %(symbol)s
+          AND bar_date >= CURRENT_DATE - (%(days)s || ' days')::interval
+        ORDER BY bar_date DESC
         LIMIT %(days)s
         """,
         {"symbol": sym, "days": days},
     )
     rows = cur.fetchall() or []
 
-    daily = [
-        {
-            "bar_date": str(r[0])[:10],
-            "ohlc_pct": float(r[1]) if r[1] is not None else None,
-            "volume_pct": float(r[2]) if r[2] is not None else None,
-            "vwap_pct": float(r[3]) if r[3] is not None else None,
-        }
-        for r in rows
-    ]
-    latest_date = daily[0]["bar_date"] if daily else None
-
-    return {
-        "ok": True,
-        "symbol": sym,
-        "latest_date": latest_date,
-        "daily": daily,
-    }
+    daily = []
+    for r in rows:
+        daily.append(
+            {
+                "date": str(r[0])[:10] if r[0] else None,
+                "ohlc_pct": float(r[1] or 0),
+                "volume_pct": float(r[2] or 0),
+                "vwap_pct": float(r[3] or 0),
+            }
+        )
+    latest = daily[0]["date"] if daily else None
+    return {"ok": True, "symbol": sym, "latest_date": latest, "daily": daily}

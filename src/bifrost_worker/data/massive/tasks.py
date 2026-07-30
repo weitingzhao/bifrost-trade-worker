@@ -1015,7 +1015,15 @@ def _apply_feed_stocks_corporate_actions(
 
 @app.task(bind=True, name="src.massive.tasks.run_massive_job")
 def run_massive_job(self, job_id: int) -> Dict[str, Any]:
-    """Execute one job_massive_backfill row."""
+    """Execute one job_massive_backfill row.
+
+    P8: when ``MASSIVE_QUEUES_DISABLED``, refuse to run (plugin owns ingest)
+    and mark the job ``failed`` so it does not stay pending forever.
+    """
+    from bifrost_worker.data.massive.celery_queues import (
+        MASSIVE_QUEUES_DISABLED,
+        MASSIVE_QUEUES_DISABLED_ERROR,
+    )
     from bifrost_core.config.startup import read_config
     from bifrost_worker.data.massive.vendor.client import MassiveClient
     from bifrost_worker.data.massive.vendor.config import get_massive_settings
@@ -1029,6 +1037,31 @@ def run_massive_job(self, job_id: int) -> Dict[str, Any]:
     cfg_path = _config_path_for_task()
     config, _ = read_config(cfg_path)
     status_cfg = config
+
+    if MASSIVE_QUEUES_DISABLED:
+        logger.warning(
+            "run_massive_job(%s) skipped: MASSIVE_QUEUES_DISABLED (use market-data plugin)",
+            job_id,
+        )
+        skip_result = {
+            "ok": False,
+            "skipped": True,
+            "reason": "massive_queues_disabled",
+            "error": MASSIVE_QUEUES_DISABLED_ERROR,
+            "job_id": job_id,
+        }
+        try:
+            if status_cfg.get("postgres") or status_cfg.get("sink") == "postgres":
+                update_job_massive_backfill_result(
+                    status_cfg, int(job_id), "failed", skip_result
+                )
+        except Exception:
+            logger.exception(
+                "run_massive_job(%s) failed to mark job terminal after disable skip",
+                job_id,
+            )
+        return skip_result
+
     if not status_cfg.get("postgres") and status_cfg.get("sink") != "postgres":
         return {"ok": False, "error": "postgres not configured"}
 
@@ -2698,6 +2731,11 @@ def apply_async_massive_pending_job(
 
     Returns ``(ok, error, celery_task_id_or_none)`` so callers can log Celery correlation id.
     """
+    from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
+
+    if MASSIVE_QUEUES_DISABLED:
+        return False, "massive_queues_disabled", None
+
     from bifrost_worker.data.massive.vendor.reader import (
         clear_massive_dispatch_token,
         finalize_massive_dispatch_celery_id,
@@ -2750,8 +2788,19 @@ def apply_async_massive_pending_job(
 
 def _enqueue_massive_job(kind: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Insert ``job_massive_backfill`` row and ``apply_async`` to the correct broker queue."""
+    from bifrost_worker.data.massive.celery_queues import (
+        MASSIVE_QUEUES_DISABLED,
+        celery_queue_for_massive_job,
+    )
+
+    if MASSIVE_QUEUES_DISABLED:
+        logger.info(
+            "Massive beat enqueue skipped (MASSIVE_QUEUES_DISABLED): kind=%s",
+            kind,
+        )
+        return {"ok": True, "skipped": True, "reason": "massive_queues_disabled", "kind": kind}
+
     from bifrost_core.config.startup import read_config
-    from bifrost_worker.data.massive.celery_queues import celery_queue_for_massive_job
     from bifrost_worker.data.massive.vendor.reader import insert_job_massive_backfill
 
     cfg_path = _config_path_for_task()
@@ -2811,6 +2860,11 @@ def beat_trim_massive_jobs() -> Dict[str, Any]:
 @app.task(name="src.massive.tasks.beat_refresh_expirations")
 def beat_refresh_expirations() -> Dict[str, Any]:
     """Celery Beat: refresh option expiration cache + option_contracts for Watchlist optionable STK symbols."""
+    from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
+
+    if MASSIVE_QUEUES_DISABLED:
+        return {"ok": True, "skipped": True, "reason": "massive_queues_disabled"}
+
     from bifrost_core.config.startup import read_config
     from bifrost_worker.data.massive.vendor.config import get_expiration_cache_settings
     from bifrost_worker.data.massive.vendor.reader import (
@@ -2900,6 +2954,10 @@ def beat_sepa_universe_grouped_daily() -> Dict[str, Any]:
 
 def reenqueue_massive_job_from_row(control_via_db: dict, row: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """``apply_async`` a pending row to the correct broker queue (standard Celery dispatch)."""
+    from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
+
+    if MASSIVE_QUEUES_DISABLED:
+        return False, "massive_queues_disabled"
     try:
         jid = int(row["job_massive_backfill_id"])
     except (TypeError, ValueError, KeyError):

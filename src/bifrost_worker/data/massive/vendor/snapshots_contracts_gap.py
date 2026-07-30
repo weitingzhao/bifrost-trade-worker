@@ -43,15 +43,21 @@ def compute_option_snapshots_contracts_gap(
 ) -> Dict[str, Any]:
     """For each distinct expiry in option_contracts, paginate Massive GET /v3/snapshot/options/{underlying}.
 
-    **Ref (massive_count)** per expiry: distinct ``contract_key`` values derived from API items that also exist in
-    ``option_contracts`` for that expiry (intersection).
-
-    **pg_count** per expiry: distinct ``contract_key`` in that intersection that have at least one
-    ``option_snapshots`` row with ``source = 'massive'``.
-
-    *gap* = *massive_total* − *pg_total* (sums over compared expiries).
-    *coverage_pct* = 100 × pg_total / massive_total when massive_total > 0.
+    P8: when Massive Celery queues are disabled, refuse (plugin owns ingest; live Massive
+    gap scans against public.* are misleading).
     """
+    from bifrost_worker.data.massive.celery_queues import (
+        MASSIVE_QUEUES_DISABLED,
+        MASSIVE_QUEUES_DISABLED_ERROR,
+    )
+
+    if MASSIVE_QUEUES_DISABLED:
+        return {
+            "ok": False,
+            "error": MASSIVE_QUEUES_DISABLED_ERROR,
+            "reason": "massive_queues_disabled",
+        }
+
     sym = (symbol or "").strip().upper()
     if not sym:
         return {"ok": False, "error": "symbol is required"}
