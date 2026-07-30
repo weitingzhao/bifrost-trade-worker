@@ -3,6 +3,10 @@
 Options sync uses ``options_massive`` / ``options_massive_high``. Ticker reference jobs use
 ``stocks_massive`` / ``stocks_massive_high`` so workers can scale or isolate pipelines without
 sharing the same Redis list as options.
+
+P8: Massive ingest moved to bifrost-platform-plugin-market-data (``data_ops.job_ingest``).
+Set ``MASSIVE_QUEUES_DISABLED = True`` so beat schedules are empty and ``run_massive_job``
+no-ops. Keep ``stocks_ib`` unchanged.
 """
 
 from __future__ import annotations
@@ -15,6 +19,31 @@ from bifrost_worker.celery.celery_queue_names import (
     BROKER_QUEUE_STOCKS_MASSIVE,
     BROKER_QUEUE_STOCKS_MASSIVE_HIGH,
 )
+
+# P8 switchover: Market Data Subcontractor owns Polygon ingest. Disable Celery Massive
+# enqueue/beat. Flip to False only for emergency rollback before plugin is ready.
+MASSIVE_QUEUES_DISABLED: Final[bool] = True
+
+# Shared English error for API / Ops when queues are disabled.
+MASSIVE_QUEUES_DISABLED_ERROR: Final[str] = (
+    "Massive queues disabled; use market-data plugin"
+)
+
+
+def massive_enqueue_refused_payload() -> dict[str, object]:
+    """Standard ``ok: false`` body when insert/enqueue is blocked by the P8 gate."""
+    return {
+        "ok": False,
+        "error": MASSIVE_QUEUES_DISABLED_ERROR,
+        "reason": "massive_queues_disabled",
+    }
+
+
+def massive_insert_failed_payload() -> dict[str, object]:
+    """Prefer disabled message when the P8 gate is on; else generic insert failure."""
+    if MASSIVE_QUEUES_DISABLED:
+        return massive_enqueue_refused_payload()
+    return {"ok": False, "error": "Failed to enqueue job"}
 
 # Full tickers universe sync (Massive ref tickers list). Canonical ``feed_stocks_tickers_reference_universe``;
 # legacy ``ticker_reference_universe`` / ``stock_reference_universe`` still route here.

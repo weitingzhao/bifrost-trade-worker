@@ -32,13 +32,20 @@ def compute_option_contracts_reference_gap(
 ) -> Dict[str, Any]:
     """For each distinct expiry in option_contracts, paginate Massive GET /v3/reference/options/contracts.
 
-    **Comparable scope** is defined by **API result rows** for that expiry. PostgreSQL counts only rows whose
-    ``contract_key`` appears in that API-derived set. Rows that exist only in the database (not returned by the
-    reference list for that expiry) are **excluded** from the PG side of the comparison.
-
-    *gap* = *massive_total* − *pg_total* where *pg_total* is the sum of matched PG rows (contract_key in API universe).
-    *coverage_pct* = 100 × pg_total / massive_total when massive_total > 0 (never above 100% for this definition).
+    P8: when Massive Celery queues are disabled, refuse (plugin owns ingest).
     """
+    from bifrost_worker.data.massive.celery_queues import (
+        MASSIVE_QUEUES_DISABLED,
+        MASSIVE_QUEUES_DISABLED_ERROR,
+    )
+
+    if MASSIVE_QUEUES_DISABLED:
+        return {
+            "ok": False,
+            "error": MASSIVE_QUEUES_DISABLED_ERROR,
+            "reason": "massive_queues_disabled",
+        }
+
     sym = (symbol or "").strip().upper()
     if not sym:
         return {"ok": False, "error": "symbol is required"}

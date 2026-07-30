@@ -1,14 +1,19 @@
 """Single source of truth for Celery Beat schedules (Massive-related tasks).
 
 Used by ``src.workers.celery_app`` and ``GET /research/massive/celery-beat-schedule``.
+
+P8: when ``MASSIVE_QUEUES_DISABLED`` is True, beat entries are empty (plugin CronJobs own EOD).
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
+
 # Each entry: name, Celery task path, human label, note (for Ops /capabilities), crontab kwargs (UTC).
-MASSIVE_BEAT_SCHEDULE_SPEC: List[Dict[str, Any]] = [
+# Kept for rollback documentation; not registered while MASSIVE_QUEUES_DISABLED.
+_MASSIVE_BEAT_SCHEDULE_SPEC_FULL: List[Dict[str, Any]] = [
     {
         "name": "massive-eod-pipeline",
         "task": "src.massive.tasks.beat_eod_pipeline",
@@ -60,6 +65,10 @@ MASSIVE_BEAT_SCHEDULE_SPEC: List[Dict[str, Any]] = [
     },
 ]
 
+MASSIVE_BEAT_SCHEDULE_SPEC: List[Dict[str, Any]] = (
+    [] if MASSIVE_QUEUES_DISABLED else list(_MASSIVE_BEAT_SCHEDULE_SPEC_FULL)
+)
+
 
 def beat_tasks_payload_for_capabilities() -> List[Dict[str, str]]:
     """Rows for GET /ops/celery/capabilities ``beat_tasks`` (task path + note)."""
@@ -105,4 +114,5 @@ def public_celery_beat_schedule_response() -> Dict[str, Any]:
         "ok": True,
         "timezone": "UTC",
         "entries": entries,
+        "massive_queues_disabled": bool(MASSIVE_QUEUES_DISABLED),
     }

@@ -109,6 +109,10 @@ def dispatch_pending_massive_topup(
     celery_queue: Optional[str] = None,
 ) -> int:
     """Top-up broker tasks for pending rows until in-flight cap (per queue slice or all canonical massive queues)."""
+    from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
+
+    if MASSIVE_QUEUES_DISABLED:
+        return 0
     if not status_cfg or (status_cfg.get("sink") != "postgres" and not status_cfg.get("postgres")):
         return 0
     cq = (celery_queue or "").strip()

@@ -21,7 +21,13 @@ def test_build_celery_capabilities_payload_has_matrix_and_canonical_queues() -> 
     assert len(out["run_massive_job_matrix"]) >= 1
     assert out["run_massive_job_matrix"][0]["broker_queue_standard"]
     assert out["beat_tasks"] == beat_tasks_payload_for_capabilities()
-    assert out["beat_tasks"] and len(out["beat_tasks"]) == len(beat_tasks_payload_for_capabilities())
+    # P8: MASSIVE_QUEUES_DISABLED empties beat schedule (plugin CronJobs own EOD).
+    from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
+
+    if MASSIVE_QUEUES_DISABLED:
+        assert out["beat_tasks"] == []
+    else:
+        assert out["beat_tasks"] and len(out["beat_tasks"]) == len(beat_tasks_payload_for_capabilities())
     assert out["registered_tasks"] and out["count"] == len(out["registered_tasks"])
     first = out["registered_tasks"][0]
     assert first["name"].startswith("src.")

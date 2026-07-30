@@ -19,6 +19,40 @@ from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
+_MINUTE_PERIOD_TO_DB = {
+    "1 min": "1 minute",
+    "1 minute": "1 minute",
+    "5 mins": "5 minute",
+    "5 min": "5 minute",
+    "5 minutes": "5 minute",
+    "5 minute": "5 minute",
+    "1 hour": "1 hour",
+}
+
+
+def _minute_period_db(period: str) -> str:
+    per = (period or "").strip()
+    return _MINUTE_PERIOD_TO_DB.get(per, per)
+
+
+def _norm_expiry_date(expiry: str) -> Optional[date_type]:
+    """Normalize expiry to date. Accepts YYYY-MM-DD or YYYYMMDD."""
+    e = (expiry or "").strip()
+    if not e:
+        return None
+    if len(e) >= 10 and e[4] == "-":
+        try:
+            return date_type.fromisoformat(e[:10])
+        except ValueError:
+            return None
+    digits = "".join(c for c in e if c.isdigit())
+    if len(digits) >= 8:
+        try:
+            return date_type(int(digits[0:4]), int(digits[4:6]), int(digits[6:8]))
+        except ValueError:
+            return None
+    return None
+
 
 def canonical_payload_hash(kind: str, payload: Optional[Dict[str, Any]] = None) -> str:
     """Deterministic SHA-256 of kind + payload for job deduplication."""
@@ -35,7 +69,13 @@ def insert_job_massive_backfill(
 
     Returns (job_id, deduplicated).  If an identical pending/running job exists,
     returns that job's id with deduplicated=True instead of inserting a new row.
+
+    P8: when ``MASSIVE_QUEUES_DISABLED``, refuses insert (no orphan pending rows).
     """
+    from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
+
+    if MASSIVE_QUEUES_DISABLED:
+        return None, False
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return None, False
     kind_clean = (kind or "").strip()
@@ -1265,17 +1305,208 @@ def get_option_trades(
         return []
 
 
+_SNAPSHOT_LATEST_SELECT = """
+    s.snapshot_ts,
+    s.iv, s.delta, s.gamma, s.theta, s.vega, s.open_interest,
+    s.underlying AS underlying_ticker,
+    s.day_open, s.day_high, s.day_low, s.day_close,
+    s.day_previous_close,
+    NULL::double precision AS day_change,
+    s.day_change_percent,
+    s.day_volume, s.day_vwap,
+    NULL::timestamptz AS day_last_updated,
+    NULL::date AS day_last_updated_day,
+    'massive' AS source,
+    s.fetched_at AS created_at,
+    oc.option_ticker AS _option_ticker,
+    oc.underlying AS _underlying,
+    oc.expiry AS _expiry,
+    oc.strike AS _strike,
+    oc.option_right AS _option_right
+"""
+
+_IB_CONTRACT_JOIN = """
+    FROM unnest(%s::text[], %s::date[], %s::text[], %s::float8[], %s::text[])
+      AS req(underlying, expiry, option_right, strike, ib_key)
+    JOIN market.option_contract oc
+      ON oc.underlying = req.underlying
+     AND oc.expiry = req.expiry
+     AND oc.option_right = req.option_right
+     AND abs(oc.strike - req.strike) < 1e-4
+"""
+
+
+def _map_snapshot_row_to_ib_key(
+    row: Dict[str, Any],
+    *,
+    ib_by_identity: Dict[Tuple[str, date_type, float, str], str],
+    poly_requested: set,
+) -> Optional[Dict[str, Any]]:
+    """Attach IB ``contract_key`` for callers; drop internal bridge columns."""
+    from bifrost_worker.data.massive.vendor.contract_key_bridge import (
+        ib_contract_key_from_parts,
+        identity_key,
+    )
+
+    out = dict(row)
+    req_ib_key = out.pop("_req_ib_key", None)
+    underlying = out.pop("_underlying", None) or out.get("underlying_ticker")
+    expiry = out.pop("_expiry", None)
+    strike = out.pop("_strike", None)
+    option_right = out.pop("_option_right", None)
+    option_ticker = out.pop("_option_ticker", None)
+
+    ck: Optional[str] = None
+    if req_ib_key:
+        ck = str(req_ib_key)
+    elif underlying is not None and expiry is not None and strike is not None and option_right:
+        try:
+            exp_d = expiry if isinstance(expiry, date_type) else date_type.fromisoformat(str(expiry)[:10])
+            ident = identity_key(str(underlying), exp_d, float(strike), str(option_right))
+            ck = ib_by_identity.get(ident)
+            if ck is None and option_ticker in poly_requested:
+                ck = ib_contract_key_from_parts(
+                    str(underlying), exp_d, float(strike), str(option_right)
+                )
+        except (TypeError, ValueError):
+            ck = None
+    if ck is None:
+        return None
+    out["contract_key"] = ck
+    return out
+
+
+def _fetch_option_snapshots_latest_bridged(cur: Any, keys: List[str]) -> List[Dict[str, Any]]:
+    from bifrost_worker.data.massive.vendor.contract_key_bridge import (
+        identity_key,
+        split_contract_keys,
+    )
+
+    polygon, ib_parts = split_contract_keys(keys)
+    if not polygon and not ib_parts:
+        return []
+
+    ib_by_identity = {
+        identity_key(p.underlying, p.expiry, p.strike, p.option_right): p.original_key
+        for p in ib_parts
+    }
+    poly_requested = set(polygon)
+
+    rows: List[Dict[str, Any]] = []
+
+    def _view_exists() -> bool:
+        cur.execute(
+            """
+            SELECT 1 FROM information_schema.views
+            WHERE table_schema = 'market' AND table_name = 'v_option_chain_latest'
+            LIMIT 1
+            """
+        )
+        return bool(cur.fetchone())
+
+    if polygon:
+        view_ok = False
+        try:
+            if _view_exists():
+                cur.execute(
+                    f"""
+                    SELECT {_SNAPSHOT_LATEST_SELECT}
+                    FROM market.v_option_chain_latest s
+                    JOIN market.option_contract oc ON oc.option_ticker = s.option_ticker
+                    WHERE s.option_ticker = ANY(%s)
+                    """,
+                    (polygon,),
+                )
+                view_ok = True
+        except Exception:
+            try:
+                cur.connection.rollback()
+            except Exception:
+                pass
+            view_ok = False
+
+        if not view_ok:
+            cur.execute(
+                f"""
+                SELECT DISTINCT ON (s.option_ticker)
+                    {_SNAPSHOT_LATEST_SELECT}
+                FROM market.option_snapshot s
+                JOIN market.option_contract oc ON oc.option_ticker = s.option_ticker
+                WHERE s.option_ticker = ANY(%s)
+                ORDER BY s.option_ticker, s.snapshot_ts DESC
+                """,
+                (polygon,),
+            )
+        rows.extend(dict(r) for r in cur.fetchall())
+
+    if ib_parts:
+        underlyings = [p.underlying for p in ib_parts]
+        expiries = [p.expiry for p in ib_parts]
+        strikes = [p.strike for p in ib_parts]
+        rights = [p.option_right for p in ib_parts]
+        ib_keys = [p.original_key for p in ib_parts]
+        ib_params = (underlyings, expiries, rights, strikes, ib_keys)
+        select_ib = _SNAPSHOT_LATEST_SELECT + ",\n    req.ib_key AS _req_ib_key"
+        view_ok = False
+        try:
+            if _view_exists():
+                cur.execute(
+                    f"""
+                    SELECT {select_ib}
+                    {_IB_CONTRACT_JOIN}
+                    JOIN market.v_option_chain_latest s ON s.option_ticker = oc.option_ticker
+                    """,
+                    ib_params,
+                )
+                view_ok = True
+        except Exception:
+            try:
+                cur.connection.rollback()
+            except Exception:
+                pass
+            view_ok = False
+
+        if not view_ok:
+            cur.execute(
+                f"""
+                SELECT DISTINCT ON (oc.option_ticker)
+                    {select_ib}
+                {_IB_CONTRACT_JOIN}
+                JOIN market.option_snapshot s ON s.option_ticker = oc.option_ticker
+                ORDER BY oc.option_ticker, s.snapshot_ts DESC
+                """,
+                ib_params,
+            )
+        rows.extend(dict(r) for r in cur.fetchall())
+
+    out: List[Dict[str, Any]] = []
+    seen_ck: set = set()
+    for row in rows:
+        mapped = _map_snapshot_row_to_ib_key(
+            row, ib_by_identity=ib_by_identity, poly_requested=poly_requested
+        )
+        if mapped is None:
+            continue
+        ck = mapped["contract_key"]
+        if ck in seen_ck:
+            continue
+        seen_ck.add(ck)
+        out.append(mapped)
+    return out
+
+
 def get_option_snapshots_latest(
     status_config: dict,
     contract_keys: List[str],
     source: str = "massive",
 ) -> List[Dict[str, Any]]:
-    """Latest snapshot per contract_key.
+    """Latest snapshot per contract_key from ``market.v_option_chain_latest``.
 
-    Tries the materialized view ``option_snapshots_latest`` first (fast path).
-    Falls back to ``DISTINCT ON`` from the base ``option_snapshots`` table if
-    the view does not exist or the query fails.
+    Accepts IB keys (``SYM|OPT|…``) and Polygon tickers (``O:…``). Always returns
+    IB-shaped ``contract_key`` so Discovery/Screener ``parse_contract_key`` works.
+    ``source`` is accepted for API compatibility but ignored.
     """
+    _ = source  # unused — market.* has no source column
     if not contract_keys or not status_config or (
         status_config.get("sink") != "postgres" and not status_config.get("postgres")
     ):
@@ -1288,60 +1519,132 @@ def get_option_snapshots_latest(
         conn = psycopg2.connect(**params)
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Try MV first
-                mv_ok = False
-                try:
-                    cur.execute(
-                        "SELECT 1 FROM pg_matviews WHERE schemaname = 'public' AND matviewname = 'option_snapshots_latest' LIMIT 1"
-                    )
-                    if cur.fetchone():
-                        cur.execute(
-                            """
-                            SELECT contract_key, snapshot_ts,
-                                   iv, delta, gamma, theta, vega, open_interest,
-                                   underlying_ticker,
-                                   day_open, day_high, day_low, day_close,
-                                   day_previous_close, day_change, day_change_percent,
-                                   day_volume, day_vwap, day_last_updated,
-                                   day_last_updated_day,
-                                   source, created_at
-                            FROM option_snapshots_latest
-                            WHERE contract_key = ANY(%s) AND source = %s
-                            """,
-                            (keys, source),
-                        )
-                        mv_ok = True
-                except Exception:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-
-                if not mv_ok:
-                    cur.execute(
-                        """
-                        SELECT DISTINCT ON (contract_key)
-                            contract_key, snapshot_ts,
-                            iv, delta, gamma, theta, vega, open_interest,
-                            underlying_ticker,
-                            day_open, day_high, day_low, day_close,
-                            day_previous_close, day_change, day_change_percent,
-                            day_volume, day_vwap, day_last_updated,
-                            day_last_updated_day,
-                            source, created_at
-                        FROM option_snapshots
-                        WHERE contract_key = ANY(%s) AND source = %s
-                        ORDER BY contract_key, snapshot_ts DESC
-                        """,
-                        (keys, source),
-                    )
-                rows = cur.fetchall()
-            return [dict(r) for r in rows]
+                return _fetch_option_snapshots_latest_bridged(cur, keys)
         finally:
             conn.close()
     except Exception as e:
         logger.debug("get_option_snapshots_latest failed: %s", e)
         return []
+
+
+def _fetch_option_snapshots_eod_bridged(
+    cur: Any,
+    keys: List[str],
+    since_ts: datetime,
+) -> List[Dict[str, Any]]:
+    from bifrost_worker.data.massive.vendor.contract_key_bridge import (
+        ib_contract_key_from_parts,
+        identity_key,
+        split_contract_keys,
+    )
+
+    polygon, ib_parts = split_contract_keys(keys)
+    if not polygon and not ib_parts:
+        return []
+
+    ib_by_identity = {
+        identity_key(p.underlying, p.expiry, p.strike, p.option_right): p.original_key
+        for p in ib_parts
+    }
+    poly_requested = set(polygon)
+    out: List[Dict[str, Any]] = []
+
+    def _append_mapped(raw_rows: List[Any]) -> None:
+        for row in raw_rows:
+            d = dict(row)
+            req_ib_key = d.pop("_req_ib_key", None)
+            underlying = d.pop("_underlying", None)
+            expiry = d.pop("_expiry", None)
+            strike = d.pop("_strike", None)
+            option_right = d.pop("_option_right", None)
+            option_ticker = d.pop("_option_ticker", None)
+            ck: Optional[str] = None
+            if req_ib_key:
+                ck = str(req_ib_key)
+            elif underlying is not None and expiry is not None and strike is not None and option_right:
+                try:
+                    exp_d = (
+                        expiry
+                        if isinstance(expiry, date_type)
+                        else date_type.fromisoformat(str(expiry)[:10])
+                    )
+                    ident = identity_key(str(underlying), exp_d, float(strike), str(option_right))
+                    ck = ib_by_identity.get(ident)
+                    if ck is None and option_ticker in poly_requested:
+                        ck = ib_contract_key_from_parts(
+                            str(underlying), exp_d, float(strike), str(option_right)
+                        )
+                except (TypeError, ValueError):
+                    ck = None
+            if ck is None:
+                continue
+            d["contract_key"] = ck
+            out.append(d)
+
+    if polygon:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (
+              (DATE(timezone('America/New_York', v.snapshot_ts))),
+              oc.option_ticker
+            )
+              DATE(timezone('America/New_York', v.snapshot_ts)) AS snap_day,
+              v.iv,
+              v.underlying_price,
+              v.snapshot_ts,
+              oc.option_ticker AS _option_ticker,
+              oc.underlying AS _underlying,
+              oc.expiry AS _expiry,
+              oc.strike AS _strike,
+              oc.option_right AS _option_right
+            FROM market.v_option_snapshot_with_stock v
+            JOIN market.option_contract oc ON oc.option_ticker = v.option_ticker
+            WHERE v.option_ticker = ANY(%s)
+              AND v.snapshot_ts >= %s
+            ORDER BY
+              DATE(timezone('America/New_York', v.snapshot_ts)),
+              oc.option_ticker,
+              v.snapshot_ts DESC
+            """,
+            (polygon, since_ts),
+        )
+        _append_mapped(cur.fetchall())
+
+    if ib_parts:
+        underlyings = [p.underlying for p in ib_parts]
+        expiries = [p.expiry for p in ib_parts]
+        strikes = [p.strike for p in ib_parts]
+        rights = [p.option_right for p in ib_parts]
+        ib_keys = [p.original_key for p in ib_parts]
+        cur.execute(
+            f"""
+            SELECT DISTINCT ON (
+              (DATE(timezone('America/New_York', v.snapshot_ts))),
+              oc.option_ticker
+            )
+              DATE(timezone('America/New_York', v.snapshot_ts)) AS snap_day,
+              v.iv,
+              v.underlying_price,
+              v.snapshot_ts,
+              oc.option_ticker AS _option_ticker,
+              oc.underlying AS _underlying,
+              oc.expiry AS _expiry,
+              oc.strike AS _strike,
+              oc.option_right AS _option_right,
+              req.ib_key AS _req_ib_key
+            {_IB_CONTRACT_JOIN}
+            JOIN market.v_option_snapshot_with_stock v ON v.option_ticker = oc.option_ticker
+            WHERE v.snapshot_ts >= %s
+            ORDER BY
+              DATE(timezone('America/New_York', v.snapshot_ts)),
+              oc.option_ticker,
+              v.snapshot_ts DESC
+            """,
+            (underlyings, expiries, rights, strikes, ib_keys, since_ts),
+        )
+        _append_mapped(cur.fetchall())
+
+    return out
 
 
 def get_option_snapshots_eod_per_day(
@@ -1353,9 +1656,10 @@ def get_option_snapshots_eod_per_day(
 ) -> List[Dict[str, Any]]:
     """Latest snapshot per calendar day (America/New_York) per contract_key.
 
-    Uses DISTINCT ON (snap_day, contract_key) with last snapshot_ts that day.
-    Batches ``contract_keys`` to keep ``ANY()`` lists small.
+    Reads ``market.v_option_snapshot_with_stock``. Accepts IB and Polygon keys;
+    returns IB-shaped ``contract_key``. ``source`` kept for API compat.
     """
+    _ = source  # unused — market.* has no source column
     if not contract_keys or not status_config or (
         status_config.get("sink") != "postgres" and not status_config.get("postgres")
     ):
@@ -1365,9 +1669,6 @@ def get_option_snapshots_eod_per_day(
         return []
     if since_ts is None:
         since_ts = datetime(1970, 1, 1)
-    src = (source or "massive").strip().lower()
-    if src not in ("massive", "ib"):
-        src = "massive"
     chunk_size = max(10, min(120, int(chunk_size)))
 
     out: List[Dict[str, Any]] = []
@@ -1378,37 +1679,13 @@ def get_option_snapshots_eod_per_day(
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 for i in range(0, len(keys), chunk_size):
                     batch = keys[i : i + chunk_size]
-                    cur.execute(
-                        """
-                        SELECT DISTINCT ON (
-                          (DATE(timezone('America/New_York', snapshot_ts))),
-                          contract_key
-                        )
-                          DATE(timezone('America/New_York', snapshot_ts)) AS snap_day,
-                          contract_key,
-                          iv,
-                          underlying_price,
-                          snapshot_ts
-                        FROM option_snapshots_with_underlying_day
-                        WHERE source = %s
-                          AND contract_key = ANY(%s)
-                          AND snapshot_ts >= %s
-                        ORDER BY
-                          DATE(timezone('America/New_York', snapshot_ts)),
-                          contract_key,
-                          snapshot_ts DESC
-                        """,
-                        (src, batch, since_ts),
-                    )
-                    for row in cur.fetchall():
-                        out.append(dict(row))
+                    out.extend(_fetch_option_snapshots_eod_bridged(cur, batch, since_ts))
             return out
         finally:
             conn.close()
     except Exception as e:
         logger.debug("get_option_snapshots_eod_per_day failed: %s", e)
         return []
-
 
 def get_report_option_atm_iv_daily(
     status_config: dict,
@@ -1514,22 +1791,24 @@ def get_option_bars(
     source: str = "massive",
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
-    """OHLC for one option contract from option_day (1 D) or option_min."""
+    """OHLC for one option contract from market.option_daily (1 D) or market.option_minute.
+
+    ``source`` is accepted for API compatibility but ignored (single Polygon vendor).
+    Response includes ``source='massive'`` for downstream callers.
+    """
+    _ = source  # unused — market.* has no source column
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     per = (period or "1 min").strip()
     sym = (symbol or "").strip().upper()
-    exp = _norm_expiry_db(expiry)
+    exp = _norm_expiry_date(expiry)
     r = (option_right or "").strip().upper()
     if r in ("CALL",):
         r = "C"
     if r in ("PUT",):
         r = "P"
-    if not sym or not exp:
+    if not sym or exp is None:
         return []
-    src = (source or "massive").strip().lower()
-    if src not in ("ib", "massive"):
-        src = "massive"
     try:
         params = _get_conn_params(status_config)
         conn = psycopg2.connect(**params)
@@ -1538,25 +1817,38 @@ def get_option_bars(
                 if per.upper() == "1 D":
                     cur.execute(
                         """
-                        SELECT extract(epoch from bar_time) AS time, open, high, low, close, volume, vwap, source
-                        FROM option_day
-                        WHERE symbol = %s AND expiry = %s AND strike = %s AND option_right = %s AND source = %s
-                        ORDER BY bar_time DESC NULLS LAST
+                        SELECT extract(epoch from bar_date) AS time,
+                               open, high, low, close, volume, vwap,
+                               'massive' AS source
+                        FROM market.option_daily
+                        WHERE underlying = %s AND expiry = %s
+                          AND strike = %s AND option_right = %s
+                        ORDER BY bar_date DESC NULLS LAST
                         LIMIT %s
                         """,
-                        (sym, exp, float(strike), r, src, max(1, min(500, limit))),
+                        (sym, exp, float(strike), r, max(1, min(500, limit))),
                     )
                 else:
                     cur.execute(
                         """
-                        SELECT extract(epoch from bar_time) AS time, open, high, low, close, volume, vwap, source
-                        FROM option_min
-                        WHERE symbol = %s AND expiry = %s AND strike = %s AND option_right = %s
-                          AND period = %s AND source = %s
+                        SELECT extract(epoch from bar_time) AS time,
+                               open, high, low, close, volume, vwap,
+                               'massive' AS source
+                        FROM market.option_minute
+                        WHERE underlying = %s AND expiry = %s
+                          AND strike = %s AND option_right = %s
+                          AND period = %s
                         ORDER BY bar_time DESC NULLS LAST
                         LIMIT %s
                         """,
-                        (sym, exp, float(strike), r, per, src, max(1, min(500, limit))),
+                        (
+                            sym,
+                            exp,
+                            float(strike),
+                            r,
+                            _minute_period_db(per),
+                            max(1, min(500, limit)),
+                        ),
                     )
                 rows = cur.fetchall()
             return [dict(x) for x in rows]
@@ -1724,17 +2016,15 @@ def get_massive_daily_checklist_data(
         try:
             with conn.cursor() as cur:
                 for sym in syms:
-                    ck_prefix = f"{sym}|OPT|"
-                    # Chain snapshot (Massive) on trade_date in America/New_York
+                    # Chain snapshot on trade_date in America/New_York (market.*)
                     cur.execute(
                         """
                         SELECT COUNT(*)::int, MAX(snapshot_ts)
-                        FROM option_snapshots
-                        WHERE source = 'massive'
-                          AND contract_key LIKE %s
+                        FROM market.option_snapshot
+                        WHERE UPPER(TRIM(underlying)) = %s
                           AND (snapshot_ts AT TIME ZONE 'America/New_York')::date = %s::date
                         """,
-                        (ck_prefix + "%", trade_date),
+                        (sym, trade_date),
                     )
                     snap_row = cur.fetchone()
                     snap_cnt = int(snap_row[0]) if snap_row else 0
@@ -1751,8 +2041,8 @@ def get_massive_daily_checklist_data(
                     cur.execute(
                         """
                         SELECT COUNT(*)::int, MAX(trade_date)
-                        FROM option_open_interest_daily
-                        WHERE symbol = %s AND source = 'massive' AND trade_date = %s::date
+                        FROM market.option_open_interest
+                        WHERE UPPER(TRIM(underlying)) = %s AND trade_date = %s::date
                         """,
                         (sym, trade_date),
                     )
@@ -1763,8 +2053,8 @@ def get_massive_daily_checklist_data(
                     else:
                         cur.execute(
                             """
-                            SELECT MAX(trade_date) FROM option_open_interest_daily
-                            WHERE symbol = %s AND source = 'massive'
+                            SELECT MAX(trade_date) FROM market.option_open_interest
+                            WHERE UPPER(TRIM(underlying)) = %s
                             """,
                             (sym,),
                         )
@@ -1903,14 +2193,12 @@ def get_latest_massive_job_by_kind(
 
 
 def _stock_close_on_date(cur: Any, symbol: str, trade_date: date_type) -> Optional[float]:
-    """Latest stock_day close on calendar day (if any). Prefer Massive when multiple sources."""
+    """Latest stock_daily close on calendar day (if any)."""
     try:
         cur.execute(
             """
-            SELECT close FROM stock_day
-            WHERE symbol = %s AND bar_time = %s
-            ORDER BY CASE COALESCE(source, 'ib')
-              WHEN 'massive' THEN 0 WHEN 'ib' THEN 1 WHEN 'tv' THEN 2 ELSE 3 END ASC
+            SELECT close FROM market.stock_daily
+            WHERE symbol = %s AND bar_date = %s
             LIMIT 1
             """,
             (symbol, trade_date),
@@ -1930,20 +2218,19 @@ def get_stock_day_series_for_sepa(
     lookback_days: int = 400,
     source: str = "massive",
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Batch-read stock_day rows for SEPA phase-1 technical screening.
+    """Batch-read market.stock_daily rows for SEPA phase-1 technical screening.
 
     Returns an ascending bar series per symbol with keys:
     ``symbol, bar_time, open, high, low, close, volume, source``.
+    ``source`` is accepted for API compatibility but ignored.
     """
+    _ = source  # unused — market.* has no source column
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return {}
     syms = sorted({str(s or "").strip().upper() for s in symbols if str(s or "").strip()})
     if not syms:
         return {}
     lb = max(260, min(int(lookback_days), 3000))
-    src = (source or "").strip().lower()
-    if not src:
-        src = "massive"
     out: Dict[str, List[Dict[str, Any]]] = {s: [] for s in syms}
     try:
         params = _get_conn_params(status_config)
@@ -1954,20 +2241,19 @@ def get_stock_day_series_for_sepa(
                     """
                     SELECT
                       UPPER(TRIM(symbol)) AS symbol,
-                      bar_time,
+                      bar_date AS bar_time,
                       open,
                       high,
                       low,
                       close,
                       volume,
-                      source
-                    FROM stock_day
+                      'massive' AS source
+                    FROM market.stock_daily
                     WHERE UPPER(TRIM(symbol)) = ANY(%s)
-                      AND source = %s
-                      AND bar_time >= (CURRENT_DATE - (%s || ' days')::interval)::date
-                    ORDER BY UPPER(TRIM(symbol)), bar_time ASC
+                      AND bar_date >= (CURRENT_DATE - (%s || ' days')::interval)::date
+                    ORDER BY UPPER(TRIM(symbol)), bar_date ASC
                     """,
-                    (syms, src, lb),
+                    (syms, lb),
                 )
                 rows = cur.fetchall() or []
             for row in rows:
@@ -1992,14 +2278,14 @@ def get_stock_day_close_series_for_crs(
     lookback_days: int = 420,
     source: str = "massive",
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Batch-read stock_day close series for CRS calculation."""
+    """Batch-read market.stock_daily close series for CRS calculation."""
+    _ = source  # unused — market.* has no source column
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return {}
     syms = sorted({str(s or "").strip().upper() for s in symbols if str(s or "").strip()})
     if not syms:
         return {}
     lb = max(260, min(int(lookback_days), 3000))
-    src = (source or "").strip().lower() or "massive"
     out: Dict[str, List[Dict[str, Any]]] = {s: [] for s in syms}
     try:
         params = _get_conn_params(status_config)
@@ -2010,16 +2296,15 @@ def get_stock_day_close_series_for_crs(
                     """
                     SELECT
                       UPPER(TRIM(symbol)) AS symbol,
-                      bar_time,
+                      bar_date AS bar_time,
                       close
-                    FROM stock_day
+                    FROM market.stock_daily
                     WHERE UPPER(TRIM(symbol)) = ANY(%s)
-                      AND source = %s
-                      AND bar_time >= (CURRENT_DATE - (%s || ' days')::interval)::date
+                      AND bar_date >= (CURRENT_DATE - (%s || ' days')::interval)::date
                       AND close IS NOT NULL
-                    ORDER BY UPPER(TRIM(symbol)), bar_time ASC
+                    ORDER BY UPPER(TRIM(symbol)), bar_date ASC
                     """,
-                    (syms, src, lb),
+                    (syms, lb),
                 )
                 rows = cur.fetchall() or []
             for row in rows:
@@ -2060,7 +2345,7 @@ def _load_oi_rows_from_chain_snapshots(
 ) -> Tuple[List[Dict[str, Any]], Optional[date_type], Optional[float]]:
     """When EOD ``option_open_interest_daily`` is empty, use latest snapshot OI per contract.
 
-    Option Discovery syncs chain quotes into ``option_snapshots`` (often with open_interest)
+    Option Discovery syncs chain quotes into ``market.option_snapshot`` (often with open_interest)
     even when the watchlist EOD OI job has not populated ``option_open_interest_daily``.
 
     Returns (raw_rows for strike_map_for_expiry, max snapshot calendar date, representative underlying price).
@@ -2068,87 +2353,78 @@ def _load_oi_rows_from_chain_snapshots(
     from bifrost_core.monitor.reader.max_pain_math import normalize_expiry_for_oi
 
     sym = (symbol or "").strip().upper()
-    if not sym or not exp_norm:
+    exp_date = _norm_expiry_date(exp_norm)
+    if not sym or not exp_norm or exp_date is None:
         return [], None, None
 
     best_rows: List[Dict[str, Any]] = []
     best_td: Optional[date_type] = None
     best_uc: Optional[float] = None
-    best_count = 0
 
-    for src in ("massive", "ib"):
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (oc.option_ticker)
+                oc.expiry, oc.strike, oc.option_right, os.open_interest,
+                os.snapshot_ts, os.underlying_price
+            FROM market.option_contract oc
+            INNER JOIN market.v_option_snapshot_with_stock os
+              ON os.option_ticker = oc.option_ticker
+            WHERE oc.underlying = %s AND oc.expiry = %s
+              AND os.open_interest IS NOT NULL AND os.open_interest > 0
+            ORDER BY oc.option_ticker, os.snapshot_ts DESC
+            """,
+            (sym, exp_date),
+        )
+        rows = cur.fetchall() or []
+    except Exception as ex:
+        logger.debug("_load_oi_rows_from_chain_snapshots: %s", ex)
         try:
-            cur.execute(
-                """
-                SELECT DISTINCT ON (oc.contract_key)
-                    oc.expiry, oc.strike, oc.option_right, os.open_interest,
-                    os.snapshot_ts, os.underlying_price
-                FROM option_contracts oc
-                INNER JOIN option_snapshots_with_underlying_day os ON os.contract_key = oc.contract_key
-                WHERE oc.symbol = %s AND oc.expiry = %s AND os.source = %s
-                  AND os.open_interest IS NOT NULL AND os.open_interest > 0
-                ORDER BY oc.contract_key, os.snapshot_ts DESC
-                """,
-                (sym, exp_norm, src),
-            )
-            rows = cur.fetchall() or []
-        except Exception as ex:
-            logger.debug("_load_oi_rows_from_chain_snapshots: %s", ex)
-            try:
-                cur.connection.rollback()
-            except Exception:
-                pass
+            cur.connection.rollback()
+        except Exception:
+            pass
+        return [], None, None
+
+    raw: List[Dict[str, Any]] = []
+    max_ts: Optional[datetime] = None
+    uc_vals: List[float] = []
+    for row in rows:
+        exp_v, strike, ort, oi, snap_ts, und = row[0], row[1], row[2], row[3], row[4], row[5]
+        exp_key = exp_v.isoformat()[:10].replace("-", "") if hasattr(exp_v, "isoformat") else str(exp_v or "")
+        if normalize_expiry_for_oi(exp_key) != exp_norm:
             continue
-
-        raw: List[Dict[str, Any]] = []
-        max_ts: Optional[datetime] = None
-        uc_vals: List[float] = []
-        for row in rows:
-            exp_v, strike, ort, oi, snap_ts, und = row[0], row[1], row[2], row[3], row[4], row[5]
-            exp_key = exp_v.isoformat()[:10].replace("-", "") if hasattr(exp_v, "isoformat") else str(exp_v or "")
-            if normalize_expiry_for_oi(exp_key) != exp_norm:
-                continue
-            raw.append(
-                {
-                    "expiry": exp_v.isoformat() if hasattr(exp_v, "isoformat") else str(exp_v),
-                    "strike": float(strike),
-                    "option_right": str(ort or "").strip().upper(),
-                    "open_interest": int(oi),
-                }
-            )
-            if snap_ts is not None:
-                if isinstance(snap_ts, datetime):
-                    ts = snap_ts
-                else:
-                    try:
-                        ts = datetime.fromisoformat(str(snap_ts).replace("Z", "+00:00"))
-                    except (TypeError, ValueError):
-                        ts = None
-                if ts is not None:
-                    if max_ts is None or ts > max_ts:
-                        max_ts = ts
-            if und is not None:
+        raw.append(
+            {
+                "expiry": exp_v.isoformat() if hasattr(exp_v, "isoformat") else str(exp_v),
+                "strike": float(strike),
+                "option_right": str(ort or "").strip().upper(),
+                "open_interest": int(oi),
+            }
+        )
+        if snap_ts is not None:
+            if isinstance(snap_ts, datetime):
+                ts = snap_ts
+            else:
                 try:
-                    ufv = float(und)
-                    if ufv > 0:
-                        uc_vals.append(ufv)
+                    ts = datetime.fromisoformat(str(snap_ts).replace("Z", "+00:00"))
                 except (TypeError, ValueError):
-                    pass
+                    ts = None
+            if ts is not None:
+                if max_ts is None or ts > max_ts:
+                    max_ts = ts
+        if und is not None:
+            try:
+                ufv = float(und)
+                if ufv > 0:
+                    uc_vals.append(ufv)
+            except (TypeError, ValueError):
+                pass
 
-        if len(raw) > best_count:
-            best_count = len(raw)
-            best_rows = raw
-            if max_ts is not None:
-                best_td = max_ts.date()
-            else:
-                best_td = None
-            if uc_vals:
-                best_uc = sum(uc_vals) / len(uc_vals)
-            else:
-                best_uc = None
-
-        if best_count > 0:
-            break
+    best_rows = raw
+    if max_ts is not None:
+        best_td = max_ts.date()
+    if uc_vals:
+        best_uc = sum(uc_vals) / len(uc_vals)
 
     return best_rows, best_td, best_uc
 
@@ -2333,15 +2609,13 @@ def compute_max_pain_history_from_db(
                       WHERE symbol = %s AND expiry = %s AND source = 'massive'
                     )
                     SELECT trade_date, close FROM (
-                      SELECT DISTINCT ON ((o.bar_time::date))
-                        (o.bar_time::date) AS trade_date, o.close
-                      FROM stock_day o, latest
+                      SELECT DISTINCT ON (o.bar_date)
+                        o.bar_date AS trade_date, o.close
+                      FROM market.stock_daily o, latest
                       WHERE o.symbol = %s AND latest.max_td IS NOT NULL
-                        AND (o.bar_time::date) >= (latest.max_td - %s::integer)
-                        AND (o.bar_time::date) <= latest.max_td
-                      ORDER BY (o.bar_time::date) ASC,
-                        CASE COALESCE(o.source, 'ib')
-                          WHEN 'massive' THEN 0 WHEN 'ib' THEN 1 WHEN 'tv' THEN 2 ELSE 3 END ASC
+                        AND o.bar_date >= (latest.max_td - %s::integer)
+                        AND o.bar_date <= latest.max_td
+                      ORDER BY o.bar_date ASC
                     ) x
                     ORDER BY trade_date
                     """,
@@ -2421,7 +2695,7 @@ def is_us_equity_regular_session_et(now: Optional[datetime] = None) -> bool:
 
 
 def get_option_expirations_from_contracts_db(status_config: dict, symbol: str) -> List[str]:
-    """Distinct expirations (YYYYMMDD) from option_contracts for an underlying."""
+    """Distinct expirations (YYYYMMDD) from market.option_contract for an underlying."""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     sym = (symbol or "").strip().upper()
@@ -2434,13 +2708,26 @@ def get_option_expirations_from_contracts_db(status_config: dict, symbol: str) -
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT DISTINCT expiry FROM option_contracts
-                    WHERE symbol = %s
+                    SELECT DISTINCT expiry FROM market.option_contract
+                    WHERE underlying = %s
                     ORDER BY expiry
                     """,
                     (sym,),
                 )
-                return [str(r[0]).strip() for r in cur.fetchall() if r and r[0]]
+                out: List[str] = []
+                for r in cur.fetchall():
+                    if not r or r[0] is None:
+                        continue
+                    v = r[0]
+                    if hasattr(v, "strftime"):
+                        out.append(v.strftime("%Y%m%d"))
+                    else:
+                        s = str(v).strip()
+                        if len(s) >= 10 and s[4] == "-":
+                            out.append(s[:4] + s[5:7] + s[8:10])
+                        else:
+                            out.append(s)
+                return out
         finally:
             conn.close()
     except Exception as e:
@@ -2451,12 +2738,12 @@ def get_option_expirations_from_contracts_db(status_config: dict, symbol: str) -
 def get_strikes_for_expiry_from_contracts_db(
     status_config: dict, symbol: str, expiration: str
 ) -> List[float]:
-    """Distinct strikes for symbol + expiry from option_contracts."""
+    """Distinct strikes for symbol + expiry from market.option_contract."""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     sym = (symbol or "").strip().upper()
-    exp = _norm_expiry_db((expiration or "").strip())
-    if not sym or len(exp) != 8 or not exp.isdigit():
+    exp = _norm_expiry_date((expiration or "").strip())
+    if not sym or exp is None:
         return []
     try:
         params = _get_conn_params(status_config)
@@ -2465,8 +2752,8 @@ def get_strikes_for_expiry_from_contracts_db(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT DISTINCT strike FROM option_contracts
-                    WHERE symbol = %s AND expiry = %s
+                    SELECT DISTINCT strike FROM market.option_contract
+                    WHERE underlying = %s AND expiry = %s
                     ORDER BY strike
                     """,
                     (sym, exp),
@@ -2836,11 +3123,11 @@ def get_spy_close_series(
     lookback_days: int = 420,
     source: str = "massive",
 ) -> List[float]:
-    """Read SPY daily closes (ascending) from stock_day. Shared by all symbols."""
+    """Read SPY daily closes (ascending) from market.stock_daily. Shared by all symbols."""
+    _ = source  # unused — market.* has no source column
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     lb = max(260, min(int(lookback_days), 3000))
-    src = (source or "").strip().lower() or "massive"
     try:
         params = _get_conn_params(status_config)
         conn = psycopg2.connect(**params)
@@ -2849,14 +3136,13 @@ def get_spy_close_series(
                 cur.execute(
                     """
                     SELECT close
-                    FROM stock_day
+                    FROM market.stock_daily
                     WHERE UPPER(TRIM(symbol)) = 'SPY'
-                      AND source = %s
-                      AND bar_time >= (CURRENT_DATE - (%s || ' days')::interval)::date
+                      AND bar_date >= (CURRENT_DATE - (%s || ' days')::interval)::date
                       AND close IS NOT NULL
-                    ORDER BY bar_time ASC
+                    ORDER BY bar_date ASC
                     """,
-                    (src, lb),
+                    (lb,),
                 )
                 rows = cur.fetchall() or []
             return [float(r[0]) for r in rows if r[0] is not None]
@@ -2874,13 +3160,17 @@ def get_short_interest_recent(
     settlements: int = 6,
     source: str = "massive",
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Batch-read recent short interest rows per symbol (settlement_date DESC)."""
+    """Batch-read recent short interest rows per symbol (settlement_date DESC).
+
+    Reads ``market.stock_financials`` where ``report_type = 'short_interest'`` and
+    unpacks jsonb ``data``. ``source`` kept for API compat.
+    """
+    _ = source  # unused — market.* has no source column
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return {}
     syms = sorted({str(s or "").strip().upper() for s in symbols if str(s or "").strip()})
     if not syms:
         return {}
-    src = (source or "").strip().lower() or "massive"
     out: Dict[str, List[Dict[str, Any]]] = {s: [] for s in syms}
     try:
         params = _get_conn_params(status_config)
@@ -2891,21 +3181,30 @@ def get_short_interest_recent(
                     """
                     SELECT
                       UPPER(TRIM(symbol)) AS symbol,
-                      settlement_date,
-                      short_interest,
-                      avg_daily_volume,
-                      days_to_cover
+                      period_date AS settlement_date,
+                      COALESCE(
+                        (data->>'short_interest')::bigint,
+                        (data->>'short_interest_shares')::bigint,
+                        (data->>'short_shares')::bigint
+                      ) AS short_interest,
+                      COALESCE(
+                        (data->>'avg_daily_volume')::bigint,
+                        (data->>'avg_daily_volume_consolidated')::bigint
+                      ) AS avg_daily_volume,
+                      (data->>'days_to_cover')::double precision AS days_to_cover
                     FROM (
                       SELECT *,
-                        ROW_NUMBER() OVER (PARTITION BY UPPER(TRIM(symbol)) ORDER BY settlement_date DESC) AS rn
-                      FROM public.stock_short_interest
+                        ROW_NUMBER() OVER (
+                          PARTITION BY UPPER(TRIM(symbol)) ORDER BY period_date DESC
+                        ) AS rn
+                      FROM market.stock_financials
                       WHERE UPPER(TRIM(symbol)) = ANY(%s)
-                        AND source = %s
+                        AND report_type = 'short_interest'
                     ) sub
                     WHERE rn <= %s
                     ORDER BY symbol, settlement_date DESC
                     """,
-                    (syms, src, settlements),
+                    (syms, settlements),
                 )
                 for row in cur.fetchall() or []:
                     sym = str((row or {}).get("symbol") or "").strip().upper()
@@ -2925,13 +3224,17 @@ def get_short_volume_recent(
     trade_days: int = 60,
     source: str = "massive",
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Batch-read recent short volume rows per symbol (trade_date DESC)."""
+    """Batch-read recent short volume rows per symbol (trade_date DESC).
+
+    Reads ``market.stock_financials`` where ``report_type = 'short_volume'`` and
+    unpacks jsonb ``data``. ``source`` kept for API compat.
+    """
+    _ = source  # unused — market.* has no source column
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return {}
     syms = sorted({str(s or "").strip().upper() for s in symbols if str(s or "").strip()})
     if not syms:
         return {}
-    src = (source or "").strip().lower() or "massive"
     out: Dict[str, List[Dict[str, Any]]] = {s: [] for s in syms}
     try:
         params = _get_conn_params(status_config)
@@ -2942,21 +3245,23 @@ def get_short_volume_recent(
                     """
                     SELECT
                       UPPER(TRIM(symbol)) AS symbol,
-                      trade_date,
-                      short_volume,
-                      short_volume_ratio,
-                      total_volume
+                      period_date AS trade_date,
+                      (data->>'short_volume')::bigint AS short_volume,
+                      (data->>'short_volume_ratio')::double precision AS short_volume_ratio,
+                      (data->>'total_volume')::bigint AS total_volume
                     FROM (
                       SELECT *,
-                        ROW_NUMBER() OVER (PARTITION BY UPPER(TRIM(symbol)) ORDER BY trade_date DESC) AS rn
-                      FROM public.stock_short_volume
+                        ROW_NUMBER() OVER (
+                          PARTITION BY UPPER(TRIM(symbol)) ORDER BY period_date DESC
+                        ) AS rn
+                      FROM market.stock_financials
                       WHERE UPPER(TRIM(symbol)) = ANY(%s)
-                        AND source = %s
+                        AND report_type = 'short_volume'
                     ) sub
                     WHERE rn <= %s
                     ORDER BY symbol, trade_date DESC
                     """,
-                    (syms, src, trade_days),
+                    (syms, trade_days),
                 )
                 for row in cur.fetchall() or []:
                     sym = str((row or {}).get("symbol") or "").strip().upper()
