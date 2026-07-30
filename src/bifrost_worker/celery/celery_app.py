@@ -1,17 +1,16 @@
 """Celery app for bars backfill worker. Broker and result backend use Redis from config.
 
 Usage:
-  celery -A src.workers.celery_app worker -l info -Q stocks_ib --pool=solo
-  celery -A src.workers.celery_app worker -l info -Q options_massive --pool=solo   # Massive (no IB; one job per instance by default)
-  # Stock reference jobs use queues stocks_massive / stocks_massive_high (see src.massive.celery_queues).
+  celery -A bifrost_worker.celery.celery_app worker -l info -Q stocks_ib --pool=solo
+
+P9 S3: Massive Celery ingest is retired (``MASSIVE_QUEUES_DISABLED``). Task names in
+``bifrost_worker.data.massive.tasks`` remain registered for Ops inspect; bodies no-op.
+Polygon ingest lives in bifrost-platform-plugin-market-data. Beat schedule is empty.
 
 Or: python scripts/systemd/run_celery.py [config_path]  # pool from profile; sets BIFROST_CELERY_QUEUES
 
-Celery Beat (Massive schedules): python scripts/run_celery_beat.py
-  (K8s may use: celery -A bifrost_worker.celery.celery_app beat --loglevel=info)
-
-``stocks_ib``: solo pool, one IB connection (client_id). Massive profiles: solo by default (see ``build_celery_worker_pool_argv``).
-Stop-poll runs in worker_init (solo) or worker_process_init (prefork) so Stop button works.
+``stocks_ib``: solo pool / IB Operator RPC. Stop-poll runs in worker_init (solo) or
+worker_process_init (prefork) so Stop button works.
 """
 
 from __future__ import annotations
@@ -84,7 +83,7 @@ app.conf.update(
     task_default_queue="stocks_ib",
     task_routes={
         "src.bars.tasks.backfill_bars": {"queue": "stocks_ib"},
-        # Default route; API enqueues with explicit queue= (options: options_massive/*_high, stocks: stocks_massive*).
+        # Massive task names kept for inspect; bodies no-op (MASSIVE_QUEUES_DISABLED).
         "src.massive.tasks.run_massive_job": {"queue": "options_massive"},
         "src.massive.tasks.beat_eod_pipeline": {"queue": "options_massive"},
         "src.massive.tasks.beat_corporate_watchlist": {"queue": "options_massive"},

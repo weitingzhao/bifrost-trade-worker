@@ -1,6 +1,6 @@
 """Event enums and payload types for Trading FSM and Hedge Execution FSM."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 

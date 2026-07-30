@@ -1,9 +1,7 @@
 """Unit tests for pure guard functions: data_stale, greeks_bad, in_no_trade_band, cost_ok, liquidity_ok."""
 
-import math
 from types import SimpleNamespace
 
-import pytest
 
 from bifrost_worker.daemon.core.state.enums import (
     DeltaDeviationState,
@@ -13,7 +11,7 @@ from bifrost_worker.daemon.core.state.enums import (
     SystemHealthState,
 )
 from bifrost_worker.daemon.guards.trading_guard import TradingGuard
-from bifrost_worker.daemon.core.state.snapshot import StateSnapshot, GreeksSnapshot, default_snapshot
+from bifrost_worker.daemon.core.state.snapshot import StateSnapshot, GreeksSnapshot
 
 
 def _make_snap(

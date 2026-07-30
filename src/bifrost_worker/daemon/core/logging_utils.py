@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from bifrost_worker.daemon.core.state.composite import CompositeState
 

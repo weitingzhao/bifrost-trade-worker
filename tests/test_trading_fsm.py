@@ -1,6 +1,5 @@
 """Trading FSM transition tests: 10+ key paths."""
 
-import pytest
 
 from bifrost_worker.daemon.core.state.enums import (
     ExecutionState,
@@ -8,7 +7,7 @@ from bifrost_worker.daemon.core.state.enums import (
     OptionPositionState,
     SystemHealthState,
 )
-from bifrost_worker.daemon.core.state.snapshot import StateSnapshot, GreeksSnapshot, default_snapshot
+from bifrost_worker.daemon.core.state.snapshot import StateSnapshot, GreeksSnapshot
 from bifrost_worker.daemon.core.state.enums import TradingState
 from bifrost_worker.daemon.fsm.events import TradingEvent
 from bifrost_worker.daemon.fsm.trading_fsm import TradingFSM

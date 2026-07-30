@@ -7,7 +7,8 @@ import json
 import logging
 import time
 from datetime import date as date_type
-from datetime import datetime, time
+from datetime import datetime
+from datetime import time as time_of_day
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,7 @@ from psycopg2 import ProgrammingError
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.connection import _get_conn_params
+from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +74,6 @@ def insert_job_massive_backfill(
 
     P8: when ``MASSIVE_QUEUES_DISABLED``, refuses insert (no orphan pending rows).
     """
-    from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
-
     if MASSIVE_QUEUES_DISABLED:
         return None, False
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
@@ -148,6 +148,8 @@ def update_job_massive_backfill_celery_task_id(
     New dispatch should use :func:`reserve_massive_dispatch_token` + ``apply_async`` +
     :func:`finalize_massive_dispatch_celery_id` so concurrent dispatchers cannot double-pick the same row.
     """
+    if MASSIVE_QUEUES_DISABLED:
+        return False
     return finalize_massive_dispatch_celery_id(
         status_config, job_id, None, celery_task_id
     )
@@ -157,6 +159,8 @@ def clear_massive_dispatch_token(
     status_config: dict, job_id: int, dispatch_token: str
 ) -> bool:
     """Clear a ``dispatch:…`` placeholder if still present (producer rollback)."""
+    if MASSIVE_QUEUES_DISABLED:
+        return False
     if not dispatch_token.startswith("dispatch:"):
         return False
     if not status_config or (
@@ -196,6 +200,8 @@ def reserve_massive_dispatch_token(
     status_config: dict, job_id: int,
 ) -> Optional[Dict[str, Any]]:
     """Set ``celery_task_id`` to ``dispatch:<uuid>`` for one pending row with empty broker id."""
+    if MASSIVE_QUEUES_DISABLED:
+        return None
     import uuid
 
     if not status_config or (
@@ -295,6 +301,8 @@ def reserve_next_pending_massive_job_for_queue_slice(
     qparams: List[Any],
 ) -> Optional[Dict[str, Any]]:
     """Pick next pending row for a broker slice under lock and set ``dispatch:`` token (single winner)."""
+    if MASSIVE_QUEUES_DISABLED:
+        return None
     import uuid
 
     if not status_config or (
@@ -350,6 +358,8 @@ def release_massive_job_to_pending_for_redispatch(status_config: dict, job_id: i
 
     Used when a worker hit a transient DB issue so a pull worker can claim the row again.
     """
+    if MASSIVE_QUEUES_DISABLED:
+        return False
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     try:
@@ -390,6 +400,8 @@ def claim_next_massive_job_for_queue_slice(
     Sets ``status`` to ``running`` and ``celery_task_id`` to ``claim_token`` (caller should use a
     ``dbpull:`` prefix). Returns ``job_massive_backfill_id`` or ``None`` if no row matched.
     """
+    if MASSIVE_QUEUES_DISABLED:
+        return None
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return None
     cq = (celery_queue or "").strip()
@@ -443,6 +455,8 @@ def claim_next_massive_job_for_queue_slice(
 
 
 def get_job_massive_backfill(status_config: dict, job_id: Any) -> Optional[Dict[str, Any]]:
+    if MASSIVE_QUEUES_DISABLED:
+        return None
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return None
     try:
@@ -482,6 +496,8 @@ def get_and_claim_massive_backfill_for_run(
     Uncoordinated concurrent execution previously raced on ``update_job... running`` and could mark rows
     ``failed`` under worker saturation.
     """
+    if MASSIVE_QUEUES_DISABLED:
+        return None, "not_found"
     if not status_config or (
         status_config.get("sink") != "postgres" and not status_config.get("postgres")
     ):
@@ -584,6 +600,8 @@ def list_job_massive_backfill(
     celery_queue: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Latest Massive sync jobs, newest first."""
+    if MASSIVE_QUEUES_DISABLED:
+        return []
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     lim = max(1, min(int(limit), 100))
@@ -659,6 +677,8 @@ def _massive_celery_queue_condition(celery_queue: str) -> Tuple[Optional[str], L
 
 def delete_job_massive_backfill(status_config: dict, job_id: Any) -> bool:
     """Delete one job_massive_backfill row by id. Returns True if deleted or not found."""
+    if MASSIVE_QUEUES_DISABLED:
+        return False
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     try:
@@ -689,6 +709,8 @@ def delete_all_job_massive_backfill(
     celery_queue: Optional[str] = None,
 ) -> int:
     """Delete Massive jobs, optionally scoped by status and/or Celery queue routing."""
+    if MASSIVE_QUEUES_DISABLED:
+        return 0
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return 0
     sf = (status_filter or "").strip().lower()
@@ -727,6 +749,8 @@ def trim_job_massive_backfill(
     status_config: dict, keep: int = 200, celery_queue: Optional[str] = None,
 ) -> int:
     """Keep the newest ``keep`` rows (globally or within one Celery queue slice); delete older."""
+    if MASSIVE_QUEUES_DISABLED:
+        return 0
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return 0
     k = max(1, min(int(keep), 50_000))
@@ -781,6 +805,8 @@ def count_job_massive_backfill_by_status(
     celery_queue: Optional[str] = None,
 ) -> Dict[str, int]:
     """Return counts per status, optionally scoped to one broker queue slice."""
+    if MASSIVE_QUEUES_DISABLED:
+        return {}
     labels = ("pending", "running", "done", "failed")
     out: Dict[str, int] = {s: 0 for s in labels}
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
@@ -821,6 +847,8 @@ def reset_failed_job_massive_backfill_batch(
     limit: int,
 ) -> List[Dict[str, Any]]:
     """Set failed rows to pending (cleared result) for re-enqueue; returns updated rows (oldest failed first)."""
+    if MASSIVE_QUEUES_DISABLED:
+        return []
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     lim = max(1, min(int(limit), 2000))
@@ -866,6 +894,8 @@ def reset_failed_job_massive_backfill_batch(
 
 def reset_failed_job_massive_backfill_one(status_config: dict, job_id: Any) -> Optional[Dict[str, Any]]:
     """If the row is ``failed``, set ``pending`` and clear ``result`` / ``celery_task_id``. Returns row for re-enqueue."""
+    if MASSIVE_QUEUES_DISABLED:
+        return None
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return None
     try:
@@ -917,6 +947,8 @@ def update_job_massive_backfill_result(
     status: str,
     result: Optional[Dict[str, Any]] = None,
 ) -> bool:
+    if MASSIVE_QUEUES_DISABLED:
+        return False
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     try:
@@ -1197,6 +1229,17 @@ def delete_job_sepa_phase4(status_config: dict, job_id: str) -> bool:
         return False
 
 
+def _expiry_to_date_param(expiry: str) -> Optional[str]:
+    """Normalize expiry string to ISO date (YYYY-MM-DD) for market.* date columns."""
+    e = _norm_expiry_db(str(expiry or "").strip())
+    if len(e) == 8 and e.isdigit():
+        return f"{e[:4]}-{e[4:6]}-{e[6:8]}"
+    raw = (expiry or "").strip()
+    if len(raw) >= 10 and raw[4] == "-":
+        return raw[:10]
+    return None
+
+
 def get_option_open_interest_daily(
     status_config: dict,
     symbol: str,
@@ -1205,62 +1248,73 @@ def get_option_open_interest_daily(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Latest OI rows for symbol (optional expiry and trade_date range)."""
+    """Latest OI rows for symbol from market.option_open_interest (optional expiry / trade_date range)."""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     sym = (symbol or "").strip().upper()
     if not sym:
         return []
+    _OI_SELECT = """
+        SELECT option_ticker AS contract_key,
+               underlying AS symbol,
+               expiry::text AS expiry,
+               strike,
+               option_right,
+               trade_date,
+               open_interest,
+               'polygon' AS source
+        FROM market.option_open_interest
+    """
     try:
         params = _get_conn_params(status_config)
         conn = psycopg2.connect(**params)
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                lim = max(1, min(500, limit))
+                exp_d = _expiry_to_date_param(expiry) if expiry else None
+                if expiry and exp_d is None:
+                    return []
                 if expiry and date_from and date_to:
                     cur.execute(
-                        """
-                        SELECT contract_key, symbol, expiry, strike, option_right, trade_date, open_interest, source
-                        FROM option_open_interest_daily
-                        WHERE symbol = %s AND expiry = %s
+                        _OI_SELECT
+                        + """
+                        WHERE underlying = %s AND expiry = %s::date
                           AND trade_date >= %s::date AND trade_date <= %s::date
                         ORDER BY trade_date DESC
                         LIMIT %s
                         """,
-                        (sym, expiry.strip(), date_from[:10], date_to[:10], max(1, min(500, limit))),
+                        (sym, exp_d, date_from[:10], date_to[:10], lim),
                     )
                 elif expiry:
                     cur.execute(
-                        """
-                        SELECT contract_key, symbol, expiry, strike, option_right, trade_date, open_interest, source
-                        FROM option_open_interest_daily
-                        WHERE symbol = %s AND expiry = %s
+                        _OI_SELECT
+                        + """
+                        WHERE underlying = %s AND expiry = %s::date
                         ORDER BY trade_date DESC
                         LIMIT %s
                         """,
-                        (sym, expiry.strip(), max(1, min(500, limit))),
+                        (sym, exp_d, lim),
                     )
                 elif date_from and date_to:
                     cur.execute(
-                        """
-                        SELECT contract_key, symbol, expiry, strike, option_right, trade_date, open_interest, source
-                        FROM option_open_interest_daily
-                        WHERE symbol = %s
+                        _OI_SELECT
+                        + """
+                        WHERE underlying = %s
                           AND trade_date >= %s::date AND trade_date <= %s::date
                         ORDER BY trade_date DESC
                         LIMIT %s
                         """,
-                        (sym, date_from[:10], date_to[:10], max(1, min(500, limit))),
+                        (sym, date_from[:10], date_to[:10], lim),
                     )
                 else:
                     cur.execute(
-                        """
-                        SELECT contract_key, symbol, expiry, strike, option_right, trade_date, open_interest, source
-                        FROM option_open_interest_daily
-                        WHERE symbol = %s
+                        _OI_SELECT
+                        + """
+                        WHERE underlying = %s
                         ORDER BY trade_date DESC
                         LIMIT %s
                         """,
-                        (sym, max(1, min(500, limit))),
+                        (sym, lim),
                     )
                 rows = cur.fetchall()
             return [dict(r) for r in rows]
@@ -1861,6 +1915,8 @@ def get_option_bars(
 
 def count_pending_massive_jobs(status_config: dict) -> int:
     """Count job_massive_backfill rows with status pending or running."""
+    if MASSIVE_QUEUES_DISABLED:
+        return 0
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return 0
     try:
@@ -2163,6 +2219,8 @@ def get_latest_massive_job_by_kind(
     status_config: dict, kind: str
 ) -> Optional[Dict[str, Any]]:
     """Latest job row for a given kind (newest first)."""
+    if MASSIVE_QUEUES_DISABLED:
+        return None
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return None
     k = (kind or "").strip().lower()
@@ -2343,10 +2401,10 @@ def _load_oi_rows_from_chain_snapshots(
     symbol: str,
     exp_norm: str,
 ) -> Tuple[List[Dict[str, Any]], Optional[date_type], Optional[float]]:
-    """When EOD ``option_open_interest_daily`` is empty, use latest snapshot OI per contract.
+    """When EOD ``market.option_open_interest`` is empty, use latest snapshot OI per contract.
 
     Option Discovery syncs chain quotes into ``market.option_snapshot`` (often with open_interest)
-    even when the watchlist EOD OI job has not populated ``option_open_interest_daily``.
+    even when the watchlist EOD OI job has not populated ``market.option_open_interest``.
 
     Returns (raw_rows for strike_map_for_expiry, max snapshot calendar date, representative underlying price).
     """
@@ -2436,7 +2494,7 @@ def compute_max_pain_live_from_db(
     expiry: str,
     trade_date: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Real-time Max Pain from option_open_interest_daily, with chain-snapshot OI fallback."""
+    """Real-time Max Pain from market.option_open_interest, with chain-snapshot OI fallback."""
     from bifrost_core.monitor.reader.max_pain_math import (
         compute_max_pain_curve,
         normalize_expiry_for_oi,
@@ -2450,6 +2508,9 @@ def compute_max_pain_live_from_db(
     if not sym or not exp:
         return {"ok": False, "error": "symbol and expiry are required"}
     exp_norm = normalize_expiry_for_oi(exp)
+    exp_d = _expiry_to_date_param(exp_norm)
+    if exp_d is None:
+        return {"ok": False, "error": "invalid expiry"}
     explicit_trade_date = bool(trade_date and str(trade_date).strip())
     oi_basis = "eod_open_interest_daily"
     snapshot_uc: Optional[float] = None
@@ -2466,10 +2527,10 @@ def compute_max_pain_live_from_db(
                     cur.execute(
                         """
                         SELECT expiry, strike, option_right, open_interest
-                        FROM option_open_interest_daily
-                        WHERE symbol = %s AND expiry = %s AND trade_date = %s AND source = 'massive'
+                        FROM market.option_open_interest
+                        WHERE underlying = %s AND expiry = %s::date AND trade_date = %s
                         """,
-                        (sym, exp_norm, td_use),
+                        (sym, exp_d, td_use),
                     )
                     raw_rows = [
                         {"expiry": row[0], "strike": row[1], "option_right": row[2], "open_interest": row[3]}
@@ -2478,10 +2539,10 @@ def compute_max_pain_live_from_db(
                 else:
                     cur.execute(
                         """
-                        SELECT MAX(trade_date) FROM option_open_interest_daily
-                        WHERE symbol = %s AND expiry = %s AND source = 'massive'
+                        SELECT MAX(trade_date) FROM market.option_open_interest
+                        WHERE underlying = %s AND expiry = %s::date
                         """,
-                        (sym, exp_norm),
+                        (sym, exp_d),
                     )
                     r0 = cur.fetchone()
                     if r0 and r0[0] is not None:
@@ -2491,10 +2552,10 @@ def compute_max_pain_live_from_db(
                         cur.execute(
                             """
                             SELECT expiry, strike, option_right, open_interest
-                            FROM option_open_interest_daily
-                            WHERE symbol = %s AND expiry = %s AND trade_date = %s AND source = 'massive'
+                            FROM market.option_open_interest
+                            WHERE underlying = %s AND expiry = %s::date AND trade_date = %s
                             """,
-                            (sym, exp_norm, td_use),
+                            (sym, exp_d, td_use),
                         )
                         raw_rows = [
                             {"expiry": row[0], "strike": row[1], "option_right": row[2], "open_interest": row[3]}
@@ -2585,28 +2646,31 @@ def compute_max_pain_history_from_db(
         conn = psycopg2.connect(**params)
         try:
             with conn.cursor() as cur:
+                exp_d = _expiry_to_date_param(exp_norm)
+                if exp_d is None:
+                    return {"ok": False, "error": "invalid expiry", "series": []}
                 cur.execute(
                     """
                     WITH latest AS (
-                      SELECT MAX(trade_date) AS max_td FROM option_open_interest_daily
-                      WHERE symbol = %s AND expiry = %s AND source = 'massive'
+                      SELECT MAX(trade_date) AS max_td FROM market.option_open_interest
+                      WHERE underlying = %s AND expiry = %s::date
                     )
                     SELECT o.trade_date, o.expiry, o.strike, o.option_right, o.open_interest
-                    FROM option_open_interest_daily o, latest
-                    WHERE o.symbol = %s AND o.expiry = %s AND o.source = 'massive'
+                    FROM market.option_open_interest o, latest
+                    WHERE o.underlying = %s AND o.expiry = %s::date
                       AND latest.max_td IS NOT NULL
                       AND o.trade_date >= (latest.max_td - %s::integer)
                       AND o.trade_date <= latest.max_td
                     ORDER BY o.trade_date, o.strike
                     """,
-                    (sym, exp_norm, sym, exp_norm, lb),
+                    (sym, exp_d, sym, exp_d, lb),
                 )
                 all_rows = cur.fetchall()
                 cur.execute(
                     """
                     WITH latest AS (
-                      SELECT MAX(trade_date) AS max_td FROM option_open_interest_daily
-                      WHERE symbol = %s AND expiry = %s AND source = 'massive'
+                      SELECT MAX(trade_date) AS max_td FROM market.option_open_interest
+                      WHERE underlying = %s AND expiry = %s::date
                     )
                     SELECT trade_date, close FROM (
                       SELECT DISTINCT ON (o.bar_date)
@@ -2619,7 +2683,7 @@ def compute_max_pain_history_from_db(
                     ) x
                     ORDER BY trade_date
                     """,
-                    (sym, exp_norm, sym, lb),
+                    (sym, exp_d, sym, lb),
                 )
                 stock_rows = cur.fetchall()
         finally:
@@ -2691,7 +2755,7 @@ def is_us_equity_regular_session_et(now: Optional[datetime] = None) -> bool:
     if dt.weekday() >= 5:
         return False
     t = dt.time()
-    return time(9, 30) <= t < time(16, 0)
+    return time_of_day(9, 30) <= t < time_of_day(16, 0)
 
 
 def get_option_expirations_from_contracts_db(status_config: dict, symbol: str) -> List[str]:
@@ -2776,7 +2840,11 @@ def get_strikes_for_expiry_from_contracts_db(
 def get_option_expiration_cache_snapshot(
     status_config: dict, symbol: str, source: str = "massive"
 ) -> Optional[Tuple[List[str], Optional[datetime]]]:
-    """Return (sorted expirations, max updated_at) or None if no rows / table missing."""
+    """Return (sorted expirations, max updated_at) from market.option_expiration.
+
+    ``source`` is accepted for API compatibility but ignored (no source column).
+    """
+    _ = source
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return None
     sym = (symbol or "").strip().upper()
@@ -2789,11 +2857,11 @@ def get_option_expiration_cache_snapshot(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT expiry, updated_at FROM option_expiration_cache
-                    WHERE symbol = %s AND source = %s
+                    SELECT expiry, updated_at FROM market.option_expiration
+                    WHERE underlying = %s
                     ORDER BY expiry
                     """,
-                    (sym, source),
+                    (sym,),
                 )
                 rows = cur.fetchall()
             if not rows:
@@ -2801,7 +2869,11 @@ def get_option_expiration_cache_snapshot(
             exps: List[str] = []
             max_u: Optional[datetime] = None
             for r in rows:
-                exps.append(str(r[0]).strip())
+                exp_raw = r[0]
+                if hasattr(exp_raw, "isoformat"):
+                    exps.append(exp_raw.isoformat()[:10])
+                else:
+                    exps.append(str(exp_raw).strip())
                 u = r[1]
                 if u is not None:
                     if hasattr(u, "tzinfo") and u.tzinfo is None:
@@ -2827,7 +2899,11 @@ def replace_option_expiration_cache(
     expirations: List[str],
     source: str = "massive",
 ) -> None:
-    """Replace full expiration list for a symbol (full-chain refresh)."""
+    """Replace full expiration list for a symbol in market.option_expiration.
+
+    ``source`` is accepted for API compatibility but ignored (no source column).
+    """
+    _ = source
     sym = (symbol or "").strip().upper()
     if not sym or not status_config:
         return
@@ -2839,19 +2915,20 @@ def replace_option_expiration_cache(
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM option_expiration_cache WHERE symbol = %s AND source = %s",
-                    (sym, source),
+                    "DELETE FROM market.option_expiration WHERE underlying = %s",
+                    (sym,),
                 )
                 for raw in expirations:
-                    e = _norm_expiry_db(str(raw))
-                    if len(e) != 8 or not e.isdigit():
+                    exp_d = _expiry_to_date_param(str(raw))
+                    if not exp_d:
                         continue
                     cur.execute(
                         """
-                        INSERT INTO option_expiration_cache (symbol, expiry, source, last_seen_at, updated_at)
-                        VALUES (%s, %s, %s, now(), now())
+                        INSERT INTO market.option_expiration (underlying, expiry, updated_at)
+                        VALUES (%s, %s::date, now())
+                        ON CONFLICT (underlying, expiry) DO UPDATE SET updated_at = now()
                         """,
-                        (sym, e, source),
+                        (sym, exp_d),
                     )
             conn.commit()
         finally:

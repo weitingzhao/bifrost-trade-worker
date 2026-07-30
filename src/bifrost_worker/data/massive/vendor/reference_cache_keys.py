@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Optional
+from typing import Any
 
 # TTL seconds
 CACHE_TTL_TICKER_SEC = 3600

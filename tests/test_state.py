@@ -1,9 +1,7 @@
 """Unit tests for Store (Phase 1: quote, spread, last_hedge_price)."""
 
 import threading
-import time
 
-import pytest
 
 from bifrost_worker.daemon.core.store import Store
 

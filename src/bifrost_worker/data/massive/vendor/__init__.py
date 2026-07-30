@@ -1,1 +1,1 @@
-"""Massive (Polygon) REST client, config, and PostgreSQL read/write helpers."""
+"""Massive vendor helpers: slim client stub, config, and PostgreSQL reader."""
