@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-import pytest
 
 from bifrost_worker.daemon.core.state.classifier import StateClassifier
 from bifrost_worker.daemon.core.state.composite import CompositeState
@@ -15,7 +14,6 @@ from bifrost_worker.daemon.core.state.enums import (
     OptionPositionState,
     SystemHealthState,
 )
-from bifrost_core.portfolio.positions.portfolio import OptionLeg
 
 
 def _future_yyyymmdd(days: int) -> str:
@@ -91,7 +89,7 @@ class TestClassifyD:
 # --- M: MarketRegimeState ---
 class TestClassifyM:
     def test_m5_stale(self):
-        md = SimpleNamespace(last_ts=None)
+        SimpleNamespace(last_ts=None)
         # No last_ts -> no stale
         cfg = {"market": {"stale_ts_threshold_ms": 1000}}
         # Use a mock that has last_ts very old

@@ -3,7 +3,6 @@
 import time
 from datetime import date, timedelta
 
-import pytest
 
 from bifrost_worker.daemon.guards.execution_guard import ExecutionGuard
 

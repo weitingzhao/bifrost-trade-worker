@@ -1,6 +1,5 @@
 """Hedge FSM tests: full fill, partial fill, timeout->reprice, broker_down->cancel->recover."""
 
-import pytest
 
 from bifrost_worker.daemon.core.state.enums import ExecutionState, HedgeState
 from bifrost_worker.daemon.fsm.events import TargetPositionEvent

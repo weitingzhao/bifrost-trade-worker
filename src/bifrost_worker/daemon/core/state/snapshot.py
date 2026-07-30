@@ -3,7 +3,7 @@
 import math
 import time
 from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from bifrost_worker.daemon.core.state.enums import (
     DeltaDeviationState,

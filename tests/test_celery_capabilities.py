@@ -18,16 +18,19 @@ def test_build_celery_capabilities_payload_has_matrix_and_canonical_queues() -> 
     assert out["canonical_broker_queues"] == list(load_canonical_broker_queue_names(cfg))
     assert out["broker_queue_labels"].get("options_massive") == "Options Massive"
     assert out["broker_queue_labels"].get("stocks_ib") == "Stocks IB"
-    assert len(out["run_massive_job_matrix"]) >= 1
-    assert out["run_massive_job_matrix"][0]["broker_queue_standard"]
     assert out["beat_tasks"] == beat_tasks_payload_for_capabilities()
-    # P8: MASSIVE_QUEUES_DISABLED empties beat schedule (plugin CronJobs own EOD).
+    # P8/P9: MASSIVE_QUEUES_DISABLED empties beat + matrix (plugin owns ingest).
     from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
 
     if MASSIVE_QUEUES_DISABLED:
         assert out["beat_tasks"] == []
+        assert out["run_massive_job_matrix"] == []
     else:
-        assert out["beat_tasks"] and len(out["beat_tasks"]) == len(beat_tasks_payload_for_capabilities())
+        assert len(out["run_massive_job_matrix"]) >= 1
+        assert out["run_massive_job_matrix"][0]["broker_queue_standard"]
+        assert out["beat_tasks"] and len(out["beat_tasks"]) == len(
+            beat_tasks_payload_for_capabilities()
+        )
     assert out["registered_tasks"] and out["count"] == len(out["registered_tasks"])
     first = out["registered_tasks"][0]
     assert first["name"].startswith("src.")

@@ -2,7 +2,6 @@
 
 import time
 
-import pytest
 
 from bifrost_worker.daemon.core.store import Store
 from bifrost_worker.daemon.guards.execution_guard import ExecutionGuard

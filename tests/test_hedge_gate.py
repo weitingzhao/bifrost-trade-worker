@@ -2,7 +2,6 @@
 
 import time
 
-import pytest
 
 from bifrost_worker.daemon.core.state.composite import CompositeState
 from bifrost_worker.daemon.core.state.enums import (

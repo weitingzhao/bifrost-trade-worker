@@ -1,6 +1,5 @@
 """Unit tests for gamma scalper hedge logic (target-position based)."""
 
-import pytest
 
 from bifrost_worker.daemon.strategy.gamma_scalper import HedgeOrder, compute_target_and_need, gamma_scalper_hedge
 

@@ -95,7 +95,6 @@ def split_contract_keys(
         if not k:
             continue
         if is_polygon_option_ticker(k):
-            uk = k.upper() if k.upper().startswith("O:") else k
             # Preserve canonical O: uppercase ticker for DB match
             canon = "O:" + k.split(":", 1)[1].upper() if ":" in k else k.upper()
             if canon not in seen_poly:

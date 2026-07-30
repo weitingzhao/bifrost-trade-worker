@@ -1,7 +1,6 @@
 """Black-Scholes delta and gamma via py_vollib."""
 
 import logging
-from typing import Optional
 
 try:
     from py_vollib.black_scholes.greeks.analytical import delta as _delta, gamma as _gamma
