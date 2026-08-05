@@ -2,7 +2,8 @@
 
 Used by ``src.workers.celery_app`` and ``GET /research/massive/celery-beat-schedule``.
 
-P8: when ``MASSIVE_QUEUES_DISABLED`` is True, beat entries are empty (plugin CronJobs own EOD).
+P8 retirement: Massive ingest migrated to bifrost-platform-plugin-market-data
+(plugin CronJobs). Beat schedule is permanently empty — no rollback list retained.
 """
 
 from __future__ import annotations
@@ -11,59 +12,8 @@ from typing import Any, Dict, List
 
 from bifrost_worker.data.massive.celery_queues import MASSIVE_QUEUES_DISABLED
 
-# Each entry: name, Celery task path, human label, note (for Ops /capabilities), crontab kwargs (UTC).
-# Kept for rollback documentation; not registered while MASSIVE_QUEUES_DISABLED.
-_MASSIVE_BEAT_SCHEDULE_SPEC_FULL: List[Dict[str, Any]] = [
-    {
-        "name": "massive-eod-pipeline",
-        "task": "src.massive.tasks.beat_eod_pipeline",
-        "label": "EOD pipeline (OI + Max Pain)",
-        "note": "Inserts eod_pipeline job: watchlist EOD OI + report_option_max_pain for the trade date.",
-        "crontab_kwargs": {"hour": 22, "minute": 0},
-    },
-    {
-        "name": "massive-corporate-watchlist",
-        "task": "src.massive.tasks.beat_corporate_watchlist",
-        "label": "Corporate actions (watchlist)",
-        "note": "Inserts feed_stocks_corporate_action job with all watchlist optionable STK symbols.",
-        "crontab_kwargs": {"hour": 23, "minute": 0},
-    },
-    {
-        "name": "massive-reconcile",
-        "task": "src.massive.tasks.beat_reconcile",
-        "label": "Reconcile (watchlist vs DB OI)",
-        "note": "Inserts reconcile job: watchlist vs DB open-interest counts.",
-        "crontab_kwargs": {"hour": 22, "minute": 45},
-    },
-    {
-        "name": "massive-trim-jobs",
-        "task": "src.massive.tasks.beat_trim_massive_jobs",
-        "label": "Trim Massive job table",
-        "note": "Inserts trim_jobs: cap job_massive_backfill history (newest 500 rows).",
-        "crontab_kwargs": {"hour": 2, "minute": 15},
-    },
-    {
-        "name": "massive-refresh-expirations",
-        "task": "src.massive.tasks.beat_refresh_expirations",
-        "label": "Refresh option expirations",
-        "note": "Runs expiration cache + option_contracts refresh in-process; not a run_massive_job enqueue.",
-        "crontab_kwargs": {"hour": "*/6", "minute": 20},
-    },
-    {
-        "name": "massive-stock-day-eod",
-        "task": "src.massive.tasks.beat_stock_day_eod",
-        "label": "Stock day EOD sync (daily_smart)",
-        "note": "After market close, enqueues feed_stocks_aggregate daily_smart for all watchlist STK symbols. Skips non-trading days. UTC 21:30 = 5:30pm EDT / 4:30pm EST.",
-        "crontab_kwargs": {"hour": 21, "minute": 30},
-    },
-    {
-        "name": "massive-sepa-universe-grouped-daily",
-        "task": "src.massive.tasks.beat_sepa_universe_grouped_daily",
-        "label": "SEPA universe daily bars (Grouped Daily, full market)",
-        "note": "After market close, enqueues feed_stocks_aggregate daily_market_summary for today. One API call covers all 5,000+ US stocks simultaneously. Skips non-trading days. UTC 22:00 = 6:00pm EDT / 5:00pm EST.",
-        "crontab_kwargs": {"hour": 22, "minute": 0},
-    },
-]
+# Permanently empty — Polygon ingest owned by plugin-market-data CronJobs.
+_MASSIVE_BEAT_SCHEDULE_SPEC_FULL: List[Dict[str, Any]] = []
 
 MASSIVE_BEAT_SCHEDULE_SPEC: List[Dict[str, Any]] = (
     [] if MASSIVE_QUEUES_DISABLED else list(_MASSIVE_BEAT_SCHEDULE_SPEC_FULL)
