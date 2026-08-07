@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start Celery worker for bars backfill and Massive jobs (Ops subprocess / systemd).
+"""Start Celery worker for bars backfill (Ops subprocess / systemd).
 
 Usage:
   python scripts/systemd/run_celery.py

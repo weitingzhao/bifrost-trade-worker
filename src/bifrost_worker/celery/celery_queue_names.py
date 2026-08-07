@@ -2,23 +2,10 @@
 
 Used by Ops queue summary, worker profiles, and UI — same strings as ``celery -Q`` lists.
 
-Stock aggregate jobs use kind ``feed_stocks_aggregate`` (legacy ``stock_ohlc_sync``) on ``stocks_massive`` / ``stocks_massive_high``.
-
-Option contract OHLC / pool jobs use kind ``feed_options_aggregate`` (legacy ``aggregates``) on ``options_massive`` / ``options_massive_high``.
-
-Options last-trade / quotes / historical trades proxy jobs use kind ``feed_options_trades_quotes`` (legacy ``trades_quotes``) on ``options_massive`` / ``options_massive_high``.
-
-Option reference contracts (list/detail/upsert/backfill) jobs use kind ``feed_option_contracts`` (legacy ``contracts``) on ``options_massive`` / ``options_massive_high``.
-
-Full tickers reference universe sync uses kind ``feed_stocks_tickers_reference_universe`` (legacy ``ticker_reference_universe`` / ``stock_reference_universe``) on ``stocks_massive`` / ``stocks_massive_high``.
-
-Ticker-reference overview jobs use kind ``feed_stocks_tickers_overview`` (legacy ``ticker_reference_overview`` / ``stock_reference_overview``) on ``stocks_massive`` / ``stocks_massive_high``.
-
-Ticker-reference related-peers jobs use kind ``feed_stocks_tickers_related`` (legacy ``ticker_reference_related`` / ``stock_reference_related``) on ``stocks_massive`` / ``stocks_massive_high``.
-
-Ticker types dictionary jobs (GET /v3/reference/tickers/types) use kind ``feed_stocks_tickers_types`` (legacy ``ticker_reference_ticker_types`` / ``ticker_reference_instrument_types`` / ``stock_reference_instrument_types``) on ``stocks_massive`` / ``stocks_massive_high``.
-
 IB historical bars backfill uses queue ``stocks_ib``.
+
+Massive / Polygon Celery queues (``stocks_massive*``, ``options_massive*``) were removed
+(market-data-expand P7 Wave 7-B); ingest lives in bifrost-platform-plugin-market-data.
 
 Display names: **authoritative** map ``ops.celery.broker_queue_display_names`` in YAML; merged into
 GET /ops/celery/capabilities ``broker_queue_labels`` and Ops queue summary ``display_name`` per row.
@@ -34,18 +21,10 @@ logger = logging.getLogger(__name__)
 
 # Redis LIST keys (stable for workers and broker).
 BROKER_QUEUE_STOCKS_IB: Final[str] = "stocks_ib"
-BROKER_QUEUE_STOCKS_MASSIVE_HIGH: Final[str] = "stocks_massive_high"
-BROKER_QUEUE_STOCKS_MASSIVE: Final[str] = "stocks_massive"
-BROKER_QUEUE_OPTIONS_MASSIVE_HIGH: Final[str] = "options_massive_high"
-BROKER_QUEUE_OPTIONS_MASSIVE: Final[str] = "options_massive"
 
 # Default order when ``ops.celery.canonical_queue_order`` is absent (tests, tools without merged YAML).
 CANONICAL_BROKER_QUEUE_NAMES: Final[Tuple[str, ...]] = (
     BROKER_QUEUE_STOCKS_IB,
-    BROKER_QUEUE_STOCKS_MASSIVE_HIGH,
-    BROKER_QUEUE_STOCKS_MASSIVE,
-    BROKER_QUEUE_OPTIONS_MASSIVE_HIGH,
-    BROKER_QUEUE_OPTIONS_MASSIVE,
 )
 
 
@@ -191,8 +170,8 @@ def build_broker_queue_labels_from_worker_profiles(config: Optional[dict]) -> Di
     return out
 
 
-# Default prefork child count when YAML omits ``massive_worker_concurrency`` (Massive profiles default to ``solo``).
-DEFAULT_MASSIVE_WORKER_CONCURRENCY: Final[int] = 1
+# Default prefork child count when YAML omits concurrency for non-IB profiles.
+DEFAULT_WORKER_CONCURRENCY: Final[int] = 1
 
 
 def build_celery_worker_pool_argv(
@@ -204,10 +183,11 @@ def build_celery_worker_pool_argv(
 ) -> List[str]:
     """Return argv fragments for ``celery worker`` pool (e.g. ``--pool=solo`` or ``--pool=prefork --concurrency=N``).
 
-    - No ``--instance`` / unresolved profile: ``solo`` (legacy worker may mix ``stocks_ib`` with Massive queues).
+    - No ``--instance`` / unresolved profile: ``solo``.
     - ``stocks_ib`` profile: always ``solo`` (single IB connection per worker OS process).
     - Other profiles: ``prefork`` unless ``ops.worker_profiles.<key>.pool`` is ``solo``; concurrency from profile,
-      else ``ops.celery.massive_worker_concurrency``, else :data:`DEFAULT_MASSIVE_WORKER_CONCURRENCY`.
+      else ``ops.celery.worker_concurrency`` / legacy ``massive_worker_concurrency``,
+      else :data:`DEFAULT_WORKER_CONCURRENCY`.
     """
     if not instance_profile_resolved or not profile_key:
         return ["--pool=solo"]
@@ -229,18 +209,21 @@ def build_celery_worker_pool_argv(
     oc = ops_celery if isinstance(ops_celery, dict) else {}
     conc_val: Any = entry.get("concurrency")
     if conc_val is None:
+        conc_val = oc.get("worker_concurrency")
+    if conc_val is None:
+        # Legacy YAML key from pre-Wave-7-B Massive worker profiles.
         conc_val = oc.get("massive_worker_concurrency")
     if conc_val is None:
-        n = DEFAULT_MASSIVE_WORKER_CONCURRENCY
+        n = DEFAULT_WORKER_CONCURRENCY
     else:
         try:
             n = int(conc_val)
         except (TypeError, ValueError):
             logger.warning(
-                "Invalid massive worker concurrency %r; using %s",
+                "Invalid worker concurrency %r; using %s",
                 conc_val,
-                DEFAULT_MASSIVE_WORKER_CONCURRENCY,
+                DEFAULT_WORKER_CONCURRENCY,
             )
-            n = DEFAULT_MASSIVE_WORKER_CONCURRENCY
+            n = DEFAULT_WORKER_CONCURRENCY
     n = max(1, min(n, 64))
     return ["--pool=prefork", f"--concurrency={n}"]

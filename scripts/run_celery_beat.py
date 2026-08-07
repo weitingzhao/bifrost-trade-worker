@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start Celery Beat for Massive schedules (K8s / compose / local).
+"""Start Celery Beat (same app as workers; beat_schedule is empty after Massive removal).
 
 Usage:
   python scripts/run_celery_beat.py
@@ -26,7 +26,7 @@ def main() -> None:
     os.environ["BIFROST_CONFIG"] = config_path
     sys.stderr.write(f"[run_celery_beat] config={config_path}\n")
 
-    # Celery Beat entry — same app as workers (beat_schedule from massive beat_schedule_public).
+    # Celery Beat entry — same app as workers (beat_schedule is empty).
     app.start(argv=["beat", "--loglevel=info"])
 
 
