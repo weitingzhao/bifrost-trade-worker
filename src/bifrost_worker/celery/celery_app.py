@@ -3,8 +3,7 @@
 Usage:
   celery -A bifrost_worker.celery.celery_app worker -l info -Q stocks_ib --pool=solo
 
-P9 S3: Massive Celery ingest is retired (``MASSIVE_QUEUES_DISABLED``). Task names in
-``bifrost_worker.data.massive.tasks`` remain registered for Ops inspect; bodies no-op.
+Massive / Polygon Celery ingest was removed (market-data-expand P7 Wave 7-B).
 Polygon ingest lives in bifrost-platform-plugin-market-data. Beat schedule is empty.
 
 Or: python scripts/systemd/run_celery.py [config_path]  # pool from profile; sets BIFROST_CELERY_QUEUES
@@ -65,13 +64,11 @@ result_backend = broker_url
 
 from celery import Celery  # noqa: E402
 
-from bifrost_worker.data.massive.beat_schedule_public import build_celery_beat_schedule  # noqa: E402
-
 app = Celery(
     "bifrost.bars",
     broker=broker_url,
     backend=result_backend,
-    include=["bifrost_worker.data.bars.tasks", "bifrost_worker.data.massive.tasks"],
+    include=["bifrost_worker.data.bars.tasks"],
 )
 app.conf.update(
     # One reserved message per worker child so multiple workers on the same queue share work fairly
@@ -83,19 +80,12 @@ app.conf.update(
     task_default_queue="stocks_ib",
     task_routes={
         "src.bars.tasks.backfill_bars": {"queue": "stocks_ib"},
-        # Massive task names kept for inspect; bodies no-op (MASSIVE_QUEUES_DISABLED).
-        "src.massive.tasks.run_massive_job": {"queue": "options_massive"},
-        "src.massive.tasks.beat_eod_pipeline": {"queue": "options_massive"},
-        "src.massive.tasks.beat_corporate_watchlist": {"queue": "options_massive"},
-        "src.massive.tasks.beat_reconcile": {"queue": "options_massive"},
-        "src.massive.tasks.beat_trim_massive_jobs": {"queue": "options_massive"},
-        "src.massive.tasks.beat_refresh_expirations": {"queue": "options_massive"},
     },
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
     result_expires=86400,
-    beat_schedule=build_celery_beat_schedule(),
+    beat_schedule={},
 )
 
 
@@ -345,7 +335,7 @@ from celery.signals import worker_ready, worker_process_init, worker_init  # noq
 
 
 def _resolve_celery_worker_id(sender: object | None) -> str:
-    """Celery nodename (e.g. workermassive-8@host.local); must match Dashboard / inspect worker_id.
+    """Celery nodename (e.g. workerib-1@host.local); must match Dashboard / inspect worker_id.
 
     ``worker_init`` / ``worker_process_init`` often run before ``Worker.hostname`` is set (solo / sender=None),
     so ``scripts/systemd/run_celery.py`` sets ``BIFROST_CELERY_NODENAME`` to match ``-n`` when using ``--instance``.
