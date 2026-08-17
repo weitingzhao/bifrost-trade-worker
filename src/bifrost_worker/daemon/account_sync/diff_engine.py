@@ -6,6 +6,14 @@ import logging
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
+from bifrost_core.persistence.postgres.brokerage_tables import (
+    ACCOUNT,
+    COMMISSIONS,
+    EXECUTIONS_RAW_TWS,
+    OPEN_ORDERS,
+    POSITIONS,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,7 +48,7 @@ class AccountSyncDiffEngine:
         self.open_orders_synced = 0
 
     def sync_all(self, conn: Any, payload: Dict[str, Any]) -> None:
-        """Run all sync steps for one snapshot payload."""
+        """Run all sync steps for one snapshot payload. ``conn`` must be golden_source."""
         accounts_list = payload.get("accounts_snapshot") or []
         exec_rows = payload.get("last_execution_rows") or []
         open_orders = payload.get("open_orders") or []
@@ -73,8 +81,8 @@ class AccountSyncDiffEngine:
                 self._account_cache[account_id] = (nl, tc, bp)
                 extra_json = _json_safe(extra) if extra else None
                 cur.execute(
-                    """
-                    INSERT INTO account (account_id, updated_at, net_liquidation, total_cash, buying_power, summary_extra)
+                    f"""
+                    INSERT INTO {ACCOUNT} (account_id, updated_at, net_liquidation, total_cash, buying_power, summary_extra)
                     VALUES (%s, now(), %s, %s, %s, %s)
                     ON CONFLICT (account_id) DO UPDATE SET
                         updated_at = now(),
@@ -138,8 +146,8 @@ class AccountSyncDiffEngine:
                             continue
                         self._position_cache[cache_key] = (pos_f, avg_f)
                         cur.execute(
-                            """
-                            INSERT INTO account_positions (account_id, symbol, sec_type, exchange, currency, position, avg_cost, expiry, strike, option_right, contract_key, updated_at)
+                            f"""
+                            INSERT INTO {POSITIONS} (account_id, symbol, sec_type, exchange, currency, position, avg_cost, expiry, strike, option_right, contract_key, updated_at)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                             ON CONFLICT (account_id, contract_key) DO UPDATE SET
                                 exchange = EXCLUDED.exchange,
@@ -159,11 +167,11 @@ class AccountSyncDiffEngine:
                 # Remove closed positions
                 if seen_keys:
                     cur.execute(
-                        "DELETE FROM account_positions WHERE account_id = %s AND (contract_key IS NULL OR contract_key != ALL(%s::text[]))",
+                        f"DELETE FROM {POSITIONS} WHERE account_id = %s AND (contract_key IS NULL OR contract_key != ALL(%s::text[]))",
                         (account_id, seen_keys),
                     )
                 else:
-                    cur.execute("DELETE FROM account_positions WHERE account_id = %s", (account_id,))
+                    cur.execute(f"DELETE FROM {POSITIONS} WHERE account_id = %s", (account_id,))
                 # Evict cache entries for this account that are no longer present
                 stale = [k for k in self._position_cache if k[0] == account_id and k[1] not in seen_keys]
                 for k in stale:
@@ -171,7 +179,7 @@ class AccountSyncDiffEngine:
         self.positions_synced += count
 
     def _sync_executions(self, conn: Any, rows: List[Dict[str, Any]]) -> None:
-        """INSERT ON CONFLICT DO NOTHING for executions_raw_tws + upsert commissions."""
+        """INSERT ON CONFLICT DO NOTHING for brokerage.executions_raw_tws + upsert commissions."""
         if not rows:
             return
         count = 0
@@ -209,7 +217,7 @@ class AccountSyncDiffEngine:
                 )
                 ph = ", ".join(["%s"] * len(vals))
                 cur.execute(
-                    f"INSERT INTO executions_raw_tws ({cols}) VALUES ({ph}) "
+                    f"INSERT INTO {EXECUTIONS_RAW_TWS} ({cols}) VALUES ({ph}) "
                     "ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING",
                     vals,
                 )
@@ -220,51 +228,50 @@ class AccountSyncDiffEngine:
                 comm_currency = r.get("commission_currency") or r.get("currency")
                 if commission is not None or realized_pnl is not None:
                     cur.execute(
-                        """
-                        INSERT INTO account_execution_commissions (exec_id, commission, realized_pnl, currency, updated_at)
-                        VALUES (%s, %s, %s, %s, now())
+                        f"""
+                        INSERT INTO {COMMISSIONS} (exec_id, commission, realized_pnl, currency)
+                        VALUES (%s, %s, %s, %s)
                         ON CONFLICT (exec_id) DO UPDATE SET
-                            commission = COALESCE(EXCLUDED.commission, account_execution_commissions.commission),
-                            realized_pnl = COALESCE(EXCLUDED.realized_pnl, account_execution_commissions.realized_pnl),
-                            currency = COALESCE(EXCLUDED.currency, account_execution_commissions.currency),
-                            updated_at = now()
+                          commission = COALESCE(EXCLUDED.commission, {COMMISSIONS}.commission),
+                          realized_pnl = COALESCE(EXCLUDED.realized_pnl, {COMMISSIONS}.realized_pnl),
+                          currency = COALESCE(EXCLUDED.currency, {COMMISSIONS}.currency)
                         """,
                         (exec_id, commission, realized_pnl, comm_currency),
                     )
         self.executions_synced += count
 
     def _sync_open_orders(self, conn: Any, orders: List[Dict[str, Any]]) -> None:
+        """Full replace of brokerage.open_orders (aligned with postgres_sink.write_open_orders)."""
         if not orders:
             return
         count = 0
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM daemon_open_orders")
+            cur.execute(f"TRUNCATE TABLE {OPEN_ORDERS}")
             for o in orders:
                 order_id = o.get("order_id") or o.get("orderId")
                 if order_id is None:
                     continue
                 cur.execute(
-                    """
-                    INSERT INTO daemon_open_orders (
-                        order_id, account_id, contract_key, symbol, sec_type,
-                        action, total_quantity, filled_quantity, remaining,
-                        status, order_type, limit_price, aux_price, updated_ts
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
+                    f"""
+                    INSERT INTO {OPEN_ORDERS} (
+                        order_id, perm_id, account_id, symbol, sec_type,
+                        action, total_quantity, filled, remaining,
+                        limit_price, status, contract_key, updated_ts
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
                     """,
                     (
                         order_id,
+                        o.get("perm_id") or o.get("permId"),
                         o.get("account_id") or o.get("account"),
-                        o.get("contract_key"),
                         o.get("symbol"),
                         o.get("secType") or o.get("sec_type"),
                         o.get("action") or o.get("side"),
                         o.get("totalQuantity") or o.get("total_quantity"),
                         o.get("filledQuantity") or o.get("filled"),
                         o.get("remaining"),
-                        o.get("status"),
-                        o.get("orderType") or o.get("order_type"),
                         o.get("lmtPrice") or o.get("limit_price"),
-                        o.get("auxPrice") or o.get("aux_price"),
+                        o.get("status"),
+                        o.get("contract_key"),
                     ),
                 )
                 count += 1

@@ -185,12 +185,15 @@ async def heartbeat_loop(app: Any) -> None:
 
         if latest is not None:
             try:
-                diff.sync_all(app.pg_conn, latest)
+                if not app._ensure_golden():
+                    raise RuntimeError("golden_source connection unavailable")
+                diff.sync_all(app.golden_conn, latest)
                 last_version = int(latest.get("version") or 0)
             except Exception as e:
                 logger.error("[AccountSync] sync_all failed: %s", e, exc_info=True)
                 try:
-                    app.pg_conn.rollback()
+                    if app.golden_conn is not None:
+                        app.golden_conn.rollback()
                 except Exception:
                     pass
 
