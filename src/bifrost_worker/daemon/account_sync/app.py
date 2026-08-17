@@ -27,6 +27,7 @@ class AccountSyncDaemon:
         self._cfg = cfg
         self.redis: Any = None
         self.pg_conn: Any = None
+        self.golden_conn: Any = None
         self.diff_engine = AccountSyncDiffEngine()
         self.running = False
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -94,6 +95,32 @@ class AccountSyncDaemon:
             raise last_err
         raise RuntimeError("[AccountSync] PG connect failed without exception")
 
+    def _connect_golden(self) -> Any:
+        from bifrost_core.persistence.postgres.connection import _get_golden_source_conn_params
+
+        params = _get_golden_source_conn_params(self._cfg)
+        conn = psycopg2.connect(**{**params, "connect_timeout": 10})
+        with conn.cursor() as cur:
+            cur.execute("SET lock_timeout = '5s'")
+            cur.execute("SET idle_in_transaction_session_timeout = '60s'")
+        conn.commit()
+        try:
+            from bifrost_core.persistence.postgres.brokerage_ddl import ensure_brokerage_schema
+
+            ensure_brokerage_schema(conn)
+            conn.commit()
+        except Exception as ddl_err:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.debug("[AccountSync] ensure_brokerage_schema (best-effort): %s", ddl_err)
+        logger.info(
+            "[AccountSync] golden_source connected: %s@%s:%s/%s",
+            params["user"], params["host"], params["port"], params["dbname"],
+        )
+        return conn
+
     def _ensure_pg(self) -> bool:
         if self.pg_conn is not None:
             try:
@@ -106,6 +133,20 @@ class AccountSyncDaemon:
             return True
         except Exception as e:
             logger.error("[AccountSync] PG reconnect failed: %s", e)
+            return False
+
+    def _ensure_golden(self) -> bool:
+        if self.golden_conn is not None:
+            try:
+                self.golden_conn.rollback()
+                return True
+            except Exception:
+                self.golden_conn = None
+        try:
+            self.golden_conn = self._connect_golden()
+            return True
+        except Exception as e:
+            logger.error("[AccountSync] golden_source reconnect failed: %s", e)
             return False
 
     def _seed_run_status(self) -> None:
@@ -159,6 +200,13 @@ class AccountSyncDaemon:
             self._write_health(alive=False)
             return
 
+        try:
+            self.golden_conn = self._connect_golden()
+        except Exception as e:
+            logger.error("[AccountSync] golden_source connect failed: %s", e)
+            self._write_health(alive=False)
+            return
+
         self._seed_run_status()
 
         logger.info("[AccountSync] CONNECTING → RUNNING")
@@ -189,6 +237,11 @@ class AccountSyncDaemon:
         if self.pg_conn is not None:
             try:
                 self.pg_conn.close()
+            except Exception:
+                pass
+        if self.golden_conn is not None:
+            try:
+                self.golden_conn.close()
             except Exception:
                 pass
         if self.redis is not None:
