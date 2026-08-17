@@ -37,17 +37,15 @@ GsTrading 主进程 — 单进程 asyncio，所有交易状态通过三层 FSM �
 | 子模块 | 职责 |
 |--------|------|
 | `celery/` | Celery app 初始化、beat 调度配置 |
-| `data/` | Polygon 期权链/OHLCV 采集、IB 历史数据回填任务 |
+| `data/` | IB 历史数据回填任务 |
 
 #### Celery 队列
 
 | 队列 | 用途 | Pool | 最大实例 |
 |------|------|------|---------|
 | `stocks_ib` | IB K 线回填 | prefork | 1 |
-| `stocks_massive` | Polygon 股票数据 | solo | 2 |
-| `stocks_massive_high` | 优先级股票数据 | solo | 1 |
-| `options_massive` | Polygon 期权数据 | solo | 4 |
-| `options_massive_high` | 优先级期权数据 | solo | 1 |
+
+> **P7**: 4 个 `*_massive*` 队列（`stocks_massive` / `stocks_massive_high` / `options_massive` / `options_massive_high`）已退役。Polygon 数据采集由 Market Data Plugin CronJob 替代。
 
 Flower 监控 UI 端口：**5555**
 
@@ -69,7 +67,7 @@ pip install -e ".[dev]"
 
 python scripts/run_daemon.py                   # 启动交易 daemon
 
-celery -A bifrost_worker.celery worker -Q stocks_massive,options_massive
+celery -A bifrost_worker.celery worker -Q stocks_ib
 celery -A bifrost_worker.celery beat            # 定时任务调度
 celery -A bifrost_worker.celery flower          # 监控 UI（端口 5555）
 
