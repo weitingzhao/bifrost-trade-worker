@@ -131,9 +131,16 @@ class AccountSyncDaemon:
     def _ensure_pg(self) -> bool:
         if self.pg_conn is not None:
             try:
-                self.pg_conn.rollback()
-                return True
+                if getattr(self.pg_conn, "closed", 0):
+                    self.pg_conn = None
+                else:
+                    self.pg_conn.rollback()
+                    return True
             except Exception:
+                try:
+                    self.pg_conn.close()
+                except Exception:
+                    pass
                 self.pg_conn = None
         try:
             self.pg_conn = self._connect_pg()
@@ -145,9 +152,16 @@ class AccountSyncDaemon:
     def _ensure_golden(self) -> bool:
         if self.golden_conn is not None:
             try:
-                self.golden_conn.rollback()
-                return True
+                if getattr(self.golden_conn, "closed", 0):
+                    self.golden_conn = None
+                else:
+                    self.golden_conn.rollback()
+                    return True
             except Exception:
+                try:
+                    self.golden_conn.close()
+                except Exception:
+                    pass
                 self.golden_conn = None
         try:
             self.golden_conn = self._connect_golden()
