@@ -153,6 +153,19 @@ async def heartbeat_loop(app: Any) -> None:
     ops_profile = ops_profile_from_config(getattr(app, "_cfg", {}))
 
     while app.running:
+        # PG can drop mid-run (CNPG failover / idle timeout). Reconnect before every cycle;
+        # do not keep advertising Redis alive=1 while account_sync_heartbeat is stale.
+        if not app._ensure_pg():
+            _write_redis_health(
+                app.redis,
+                alive=False,
+                last_sync_version=last_version,
+                stream_lag=0,
+                ops_profile=ops_profile,
+            )
+            await asyncio.sleep(2.0)
+            continue
+
         cmd = _poll_control(app.pg_conn)
         if _apply_consumed_control(app, cmd, diff):
             return
@@ -164,6 +177,15 @@ async def heartbeat_loop(app: Any) -> None:
             logger.info("[AccountSync] suspended — sleeping up to %.0fs (interruptible)", interval_sec)
             if await _sleep_account_sync_interruptible(app, interval_sec, diff):
                 return
+            if not app._ensure_pg():
+                _write_redis_health(
+                    app.redis,
+                    alive=False,
+                    last_sync_version=last_version,
+                    stream_lag=0,
+                    ops_profile=ops_profile,
+                )
+                continue
             _write_heartbeat(app.pg_conn, last_sync_version=last_version, stream_lag=0)
             _write_redis_health(app.redis, alive=True, last_sync_version=last_version, stream_lag=0, ops_profile=ops_profile)
             continue
@@ -171,6 +193,8 @@ async def heartbeat_loop(app: Any) -> None:
         remaining_sec = float(interval_sec)
         entries: List[Dict[str, Any]] = []
         while remaining_sec > 0 and app.running:
+            if not app._ensure_pg():
+                break
             cmd = _poll_control(app.pg_conn)
             if _apply_consumed_control(app, cmd, diff):
                 return
@@ -180,6 +204,17 @@ async def heartbeat_loop(app: Any) -> None:
             remaining_sec -= block_ms / 1000.0
             if entries:
                 break
+
+        if not app._ensure_pg():
+            _write_redis_health(
+                app.redis,
+                alive=False,
+                last_sync_version=last_version,
+                stream_lag=0,
+                ops_profile=ops_profile,
+            )
+            await asyncio.sleep(2.0)
+            continue
 
         latest = consumer.merge_latest(entries)
 
