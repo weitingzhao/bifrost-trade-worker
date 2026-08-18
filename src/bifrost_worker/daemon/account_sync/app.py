@@ -67,10 +67,17 @@ class AccountSyncDaemon:
                         conn.rollback()
                     except Exception:
                         pass
+                    err_s = str(ddl_err).lower()
                     if _is_lock_timeout_error(ddl_err):
                         # Another service (e.g. trading daemon) may be running DDL; schema usually exists.
                         logger.warning(
                             "[AccountSync] DDL ensure skipped (lock timeout); continuing with existing schema"
+                        )
+                    elif "must be owner" in err_s or "permission denied" in err_s:
+                        # Legacy public tables may still be owned by postgres during cutover.
+                        logger.warning(
+                            "[AccountSync] DDL ensure skipped (insufficient privilege); continuing with existing schema: %s",
+                            ddl_err,
                         )
                     else:
                         raise
