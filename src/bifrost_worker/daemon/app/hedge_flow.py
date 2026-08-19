@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 async def eval_hedge(app: Any) -> None:
-    """FSM-driven tick: refresh + snapshot -> TradingFSM (TICK) -> maybe hedge. Skips hedge when daemon_run_status.suspended (monitoring-set)."""
+    """FSM-driven tick: refresh + snapshot -> TradingFSM (TICK) -> maybe hedge. Skips hedge when Redis trading state is suspended."""
     if app._poll_run_status()[0]:
-        logger.debug("Trading suspended (daemon_run_status), skip hedge")
+        logger.debug("Trading suspended (Redis trading state), skip hedge")
         return
     result = await app._refresh_and_build_snapshot()
     if result is None:

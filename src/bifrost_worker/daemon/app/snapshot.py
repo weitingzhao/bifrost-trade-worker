@@ -44,7 +44,7 @@ def build_snapshot_dict(
     cs: CompositeState,
     data_lag_ms: Optional[float],
 ) -> dict:
-    """Build dict for StatusSink (daemon_auto_status_current / daemon_auto_status_history). Keys per docs/DATABASE.md §2.1. R-A1: optional account_* keys when available."""
+    """Build dict for StatusSink Redis trading HASH. R-A1: optional account_* keys when available."""
     d = {
         "daemon_state": app._fsm_daemon.current.value,
         "trading_state": app._fsm_trading.state.value,
@@ -104,7 +104,7 @@ def build_snapshot_dict(
 
 
 def build_heartbeat_minimal_dict(app: Any) -> dict:
-    """Minimal snapshot dict when spot is unavailable (e.g. outside market hours). Ensures daemon_auto_status_current always has a row while daemon is running. R-A1: include account_* when available."""
+    """Minimal snapshot dict when spot is unavailable (e.g. outside market hours). Ensures Redis trading HASH stays fresh while daemon is running. R-A1: include account_* when available."""
     d = {
         "daemon_state": app._fsm_daemon.current.value,
         "trading_state": app._fsm_trading.state.value,

@@ -63,7 +63,7 @@ def test_every_valid_transition_has_implementation_path():
         (DaemonState.CONNECTED, DaemonState.RUNNING): "_handle_connected returns RUNNING",
         (DaemonState.CONNECTED, DaemonState.STOPPING): "request_stop() when CONNECTED",
         (DaemonState.RUNNING, DaemonState.STOPPING): "_handle_running returns STOPPING when loop exits, or request_stop()",
-        (DaemonState.RUNNING, DaemonState.RUNNING_SUSPENDED): "heartbeat _apply_run_status_transition when daemon_run_status.suspended=true",
+        (DaemonState.RUNNING, DaemonState.RUNNING_SUSPENDED): "heartbeat _apply_run_status_transition when Redis trading state suspended=true",
         (DaemonState.RUNNING_SUSPENDED, DaemonState.RUNNING): "heartbeat _apply_run_status_transition when suspended=false",
         (DaemonState.RUNNING_SUSPENDED, DaemonState.STOPPING): "request_stop() during RUNNING_SUSPENDED",
         (DaemonState.STOPPING, DaemonState.STOPPED): "_handle_stopping returns STOPPED",
