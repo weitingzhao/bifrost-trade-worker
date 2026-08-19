@@ -11,7 +11,7 @@ from bifrost_worker.daemon.fsm.daemon_fsm import DaemonState
 
 logger = logging.getLogger(__name__)
 
-# Chunked sleep so DB-written `stop` is visible within ~1s instead of up to full heartbeat interval.
+# Chunked sleep so Redis-written `stop` is visible within ~1s instead of up to full heartbeat interval.
 HEARTBEAT_SLEEP_CHUNK_SEC = 1.0
 
 
@@ -52,7 +52,7 @@ def poll_run_status(app: Any) -> tuple[bool, Optional[float]]:
 
 
 def effective_heartbeat_interval(app: Any) -> float:
-    """Heartbeat interval in seconds (from DB if set via monitoring, else config); clamped to [5, 120]."""
+    """Heartbeat interval in seconds (from Redis trading state if set via monitoring, else config); clamped to [5, 120]."""
     raw = (
         app._heartbeat_interval_from_db
         if app._heartbeat_interval_from_db is not None
@@ -103,7 +103,7 @@ def listener_heartbeat_kwargs(app: Any) -> dict:
 
 
 def apply_run_status_transition(app: Any) -> bool:
-    """Sync Daemon FSM with daemon_run_status: RUNNING <-> RUNNING_SUSPENDED. Returns True if suspended (skip hedge)."""
+    """Sync Daemon FSM with Redis trading state: RUNNING <-> RUNNING_SUSPENDED. Returns True if suspended (skip hedge)."""
     suspended, interval = poll_run_status(app)
     app._heartbeat_interval_from_db = interval
     cur = app._fsm_daemon.current
@@ -116,12 +116,12 @@ def apply_run_status_transition(app: Any) -> bool:
     if suspended and cur == DaemonState.RUNNING:
         app._fsm_daemon.transition(DaemonState.RUNNING_SUSPENDED)
         logger.info(
-            "[Daemon] state=RUNNING → RUNNING_SUSPENDED (daemon_run_status.suspended=true)"
+            "[Daemon] state=RUNNING → RUNNING_SUSPENDED (trading state suspended=true)"
         )
     elif not suspended and cur == DaemonState.RUNNING_SUSPENDED:
         app._fsm_daemon.transition(DaemonState.RUNNING)
         logger.info(
-            "[Daemon] state=RUNNING_SUSPENDED → RUNNING (daemon_run_status.suspended=false)"
+            "[Daemon] state=RUNNING_SUSPENDED → RUNNING (trading state suspended=false)"
         )
     return suspended
 
@@ -132,24 +132,24 @@ async def _consume_one_control_command(app: Any, cmd: Optional[str]) -> bool:
         return False
     if cmd == "retry_ib":
         logger.debug(
-            "[Daemon] control (db): retry_ib consumed (legacy no-op; engine has no IB socket)"
+            "[Daemon] control (redis): retry_ib consumed (legacy no-op; engine has no IB socket)"
         )
         return False
     if cmd == "stop":
-        logger.info("[Daemon] control (db): stop → requesting stop")
+        logger.info("[Daemon] control (redis): stop → requesting stop")
         app._fsm_daemon.request_stop()
         return True
     if cmd == "flatten":
-        logger.warning("[Daemon] control (db): flatten (not implemented yet)")
+        logger.warning("[Daemon] control (redis): flatten (not implemented yet)")
         return False
     if cmd == "release_ib":
         logger.debug(
-            "[Daemon] control (db): release_ib consumed (legacy no-op; no IB connections in daemon)"
+            "[Daemon] control (redis): release_ib consumed (legacy no-op; no IB connections in daemon)"
         )
         return False
     if cmd == "refresh_accounts" and app._status_sink:
         logger.info(
-            "[Daemon] control (db): refresh_accounts → loading from Redis snapshot"
+            "[Daemon] control (redis): refresh_accounts → loading from Redis snapshot"
         )
         await app._refresh_accounts_data()
         app._last_accounts_refresh_ts = time.time()
@@ -161,25 +161,25 @@ async def _consume_one_control_command(app: Any, cmd: Optional[str]) -> bool:
         return False
     if cmd == "refresh_replay" and app._status_sink:
         logger.info(
-            "[Daemon] control (db): refresh_replay → loading executions from Redis snapshot"
+            "[Daemon] control (redis): refresh_replay → loading executions from Redis snapshot"
         )
         await app._refresh_executions_only()
         return False
     if cmd == "refresh_ticker_subscriptions":
         logger.info(
-            "[Daemon] control (db): refresh_ticker_subscriptions → report from Redis"
+            "[Daemon] control (redis): refresh_ticker_subscriptions → report from Redis"
         )
         await app._refresh_ticker_subscriptions()
         return False
     if cmd == "release_ticker_subscriptions":
         logger.info(
-            "[Daemon] control (db): release_ticker_subscriptions → clear reported list"
+            "[Daemon] control (redis): release_ticker_subscriptions → clear reported list"
         )
         await app._release_ticker_subscriptions()
         return False
     if cmd == "init_ticker_subscriptions":
         logger.info(
-            "[Daemon] control (db): init_ticker_subscriptions (no-op; use IB Ingestor)"
+            "[Daemon] control (redis): init_ticker_subscriptions (no-op; use IB Ingestor)"
         )
         await app._init_ticker_subscriptions()
         return False

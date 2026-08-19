@@ -9,9 +9,9 @@ Transition implementation (daemon_handlers.py):
 - CONNECTING -> STOPPING: request_stop() during connect
 - CONNECTED -> RUNNING: _handle_connected
 - CONNECTED -> STOPPING: request_stop() or exception in _handle_connected
-- RUNNING -> RUNNING_SUSPENDED: when daemon_run_status.suspended is true (poll in heartbeat)
+- RUNNING -> RUNNING_SUSPENDED: when Redis trading state suspended is true (poll in heartbeat)
 - RUNNING -> STOPPING: _handle_running (loop exit) or request_stop()
-- RUNNING_SUSPENDED -> RUNNING: when daemon_run_status.suspended is false (poll in heartbeat)
+- RUNNING_SUSPENDED -> RUNNING: when Redis trading state suspended is false (poll in heartbeat)
 - RUNNING_SUSPENDED -> STOPPING: request_stop()
 - STOPPING -> STOPPED: _handle_stopping
 """
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class DaemonState(str, enum.Enum):
-    """Daemon lifecycle states. RUNNING_SUSPENDED = running but hedging paused (daemon_run_status.suspended)."""
+    """Daemon lifecycle states. RUNNING_SUSPENDED = running but hedging paused (Redis trading state suspended)."""
 
     IDLE = "idle"
     CONNECTING = "connecting"

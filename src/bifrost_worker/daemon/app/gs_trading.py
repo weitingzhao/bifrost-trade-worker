@@ -47,7 +47,7 @@ class GsTrading:
         self.config = config
         self._config_path = config_path
 
-        # 1.a PostgreSQL sink early (daemon_control, snapshots, settings)
+        # 1.a Status sink early (Redis daemon IPC + PG settings / brokerage)
         postgres_cfg = config.get("postgres", {}) or {}
         self._status_sink: Optional[StatusSink] = None
         if postgres_cfg or os.environ.get("PGHOST"):
@@ -123,7 +123,7 @@ class GsTrading:
         self._market_data = MarketData(self.store)
         self._order_manager = OrderManager()
         # _status_sink already created in 1.a
-        # Phase 2: control via PostgreSQL daemon_control table when sink is postgres (RE-5: monitoring can run on another host)
+        # Phase 2: control via Redis STREAM (RE-5: monitoring can run on another host)
         self._order_manager.set_hedge_fsm(self._fsm_hedge)
         self._metrics = get_metrics()
 
@@ -248,7 +248,7 @@ class GsTrading:
         cs: CompositeState,
         data_lag_ms: Optional[float],
     ) -> dict:
-        """Build dict for StatusSink (daemon_auto_status_current / daemon_auto_status_history)."""
+        """Build dict for StatusSink Redis trading HASH (former auto_status snapshot)."""
         return _snapshot.build_snapshot_dict(self, snapshot, spot, cs, data_lag_ms)
 
     def _build_heartbeat_minimal_dict(self) -> dict:
@@ -308,11 +308,11 @@ class GsTrading:
         return _control_heartbeat.poll_control(self)
 
     def _poll_run_status(self) -> tuple[bool, Optional[float]]:
-        """Poll daemon_run_status from sink."""
+        """Poll suspended / heartbeat interval from Redis trading state."""
         return _control_heartbeat.poll_run_status(self)
 
     def _effective_heartbeat_interval(self) -> float:
-        """Heartbeat interval in seconds (from DB if set via monitoring, else config)."""
+        """Heartbeat interval in seconds (from Redis trading state if set via monitoring, else config)."""
         return _control_heartbeat.effective_heartbeat_interval(self)
 
     def _redis_quotes_connected(self) -> bool:
@@ -320,11 +320,11 @@ class GsTrading:
         return _control_heartbeat.redis_quotes_connected(self)
 
     def _listener_heartbeat_kwargs(self) -> dict:
-        """Listener connection status for daemon_heartbeat."""
+        """Listener connection fields for the Redis trading heartbeat HASH."""
         return _control_heartbeat.listener_heartbeat_kwargs(self)
 
     def _apply_run_status_transition(self) -> bool:
-        """Sync Daemon FSM with daemon_run_status: RUNNING <-> RUNNING_SUSPENDED."""
+        """Sync Daemon FSM with Redis trading state: RUNNING <-> RUNNING_SUSPENDED."""
         return _control_heartbeat.apply_run_status_transition(self)
 
     async def _heartbeat(self) -> None:
