@@ -1,4 +1,4 @@
-"""Heartbeat loop for Account Sync Daemon: consume stream → diff → write heartbeat."""
+"""Heartbeat loop for Account Sync Daemon: consume stream → diff → Redis IPC state."""
 
 from __future__ import annotations
 
@@ -7,55 +7,39 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from bifrost_core.persistence import redis_daemon_state as rds
+
 logger = logging.getLogger(__name__)
 
-# Capped XREADGROUP block so `stop` in PG is visible within ~1s, not full heartbeat interval.
+# Capped XREADGROUP block so `stop` is visible within ~1s, not full heartbeat interval.
 ACCOUNT_SYNC_MAX_BLOCK_MS = 1000
 ACCOUNT_SYNC_SLEEP_CHUNK_SEC = 1.0
 
 
-def _poll_control(conn: Any) -> Optional[str]:
-    """Read and consume one pending command from account_sync_control."""
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, command FROM account_sync_control WHERE consumed_at IS NULL ORDER BY id LIMIT 1"
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            cmd_id, cmd = row
-            cur.execute("UPDATE account_sync_control SET consumed_at = now() WHERE id = %s", (cmd_id,))
-        conn.commit()
-        return cmd
-    except Exception as e:
-        logger.warning("poll_control: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+def _poll_control(app: Any) -> Optional[str]:
+    """Consume one pending command from Redis STREAM."""
+    r = getattr(app, "redis_state", None)
+    if r is None:
         return None
+    return rds.consume_account_sync_control(r, block_ms=0)
 
 
-def _poll_run_status(conn: Any) -> tuple[bool, float]:
-    """Read account_sync_run_status: (suspended, heartbeat_interval_sec). Defaults: (False, 5.0)."""
+def _poll_run_status(app: Any) -> tuple[bool, float]:
+    """Read suspended / heartbeat_interval_sec from Redis state. Defaults: (False, 5.0)."""
+    r = getattr(app, "redis_state", None)
+    if r is None:
+        return False, 5.0
+    state = rds.read_account_sync_state(r) or {}
+    suspended = bool(state.get("suspended", False))
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT suspended, heartbeat_interval_sec FROM account_sync_run_status WHERE id = 1")
-            row = cur.fetchone()
-            if row:
-                return bool(row[0]), float(row[1] or 5.0)
-    except Exception as e:
-        logger.debug("poll_run_status: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-    return False, 5.0
+        interval = float(state.get("heartbeat_interval_sec") or 5.0)
+    except (TypeError, ValueError):
+        interval = 5.0
+    return suspended, interval
 
 
 def _write_heartbeat(
-    conn: Any,
+    app: Any,
     *,
     last_sync_version: int = 0,
     accounts_synced: int = 0,
@@ -63,38 +47,37 @@ def _write_heartbeat(
     executions_synced: int = 0,
     open_orders_synced: int = 0,
     stream_lag: int = 0,
+    alive: bool = True,
 ) -> None:
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO account_sync_heartbeat (id, last_ts, last_sync_version, accounts_synced, positions_synced, executions_synced, open_orders_synced, stream_lag, updated_at)
-                VALUES (1, now(), %s, %s, %s, %s, %s, %s, now())
-                ON CONFLICT (id) DO UPDATE SET
-                    last_ts = now(),
-                    last_sync_version = EXCLUDED.last_sync_version,
-                    accounts_synced = EXCLUDED.accounts_synced,
-                    positions_synced = EXCLUDED.positions_synced,
-                    executions_synced = EXCLUDED.executions_synced,
-                    open_orders_synced = EXCLUDED.open_orders_synced,
-                    stream_lag = EXCLUDED.stream_lag,
-                    updated_at = now()
-                """,
-                (last_sync_version, accounts_synced, positions_synced, executions_synced, open_orders_synced, stream_lag),
-            )
-        conn.commit()
-    except Exception as e:
-        logger.warning("write_heartbeat: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+    r = getattr(app, "redis_state", None)
+    if r is None:
+        return
+    rds.write_account_sync_state(
+        r,
+        {
+            "last_ts": time.time(),
+            "last_sync_version": last_sync_version,
+            "accounts_synced": accounts_synced,
+            "positions_synced": positions_synced,
+            "executions_synced": executions_synced,
+            "open_orders_synced": open_orders_synced,
+            "stream_lag": stream_lag,
+            "alive": alive,
+            "updated_at": time.time(),
+        },
+    )
+    # Keep legacy health hash for Ops lease / older readers
+    _write_legacy_health(
+        app.redis,
+        alive=alive,
+        last_sync_version=last_sync_version,
+        stream_lag=stream_lag,
+        ops_profile=getattr(app, "_ops_profile", None),
+    )
 
 
-def _apply_consumed_control(
-    app: Any, cmd: Optional[str], diff: Any
-) -> bool:
-    """Handle a consumed control row. Returns True if heartbeat_loop should exit."""
+def _apply_consumed_control(app: Any, cmd: Optional[str], diff: Any) -> bool:
+    """Handle a consumed control. Returns True if heartbeat_loop should exit."""
     if cmd == "stop":
         logger.info("[AccountSync] control: stop → requesting shutdown")
         app.running = False
@@ -114,35 +97,37 @@ async def _sleep_account_sync_interruptible(app: Any, total_sec: float, diff: An
     while remaining > 0 and app.running:
         await asyncio.sleep(min(chunk, remaining))
         remaining -= min(chunk, remaining)
-        cmd = _poll_control(app.pg_conn)
+        cmd = _poll_control(app)
         if _apply_consumed_control(app, cmd, diff):
             return True
     return False
 
 
-def _write_redis_health(
+def _write_legacy_health(
     r: Any, *, alive: bool, last_sync_version: int, stream_lag: int, ops_profile: Any = None
 ) -> None:
     from bifrost_worker.daemon.account_sync.redis_keys import ACCOUNT_SYNC_HEALTH_KEY
     from bifrost_core.core.ops_lease import maintain_health_host
 
+    if r is None:
+        return
     try:
-        # HSET only updates the specified fields; other fields (bifrost_ops_control_*) are
-        # preserved automatically — no manual read-back needed.
-        r.hset(ACCOUNT_SYNC_HEALTH_KEY, mapping={
-            "alive": "1" if alive else "0",
-            "last_sync_version": str(last_sync_version),
-            "stream_lag": str(stream_lag),
-            "updated_at": str(time.time()),
-        })
-        # Restore HOST if lost (e.g. after Redis restart); no-op when HOST is present.
+        r.hset(
+            ACCOUNT_SYNC_HEALTH_KEY,
+            mapping={
+                "alive": "1" if alive else "0",
+                "last_sync_version": str(last_sync_version),
+                "stream_lag": str(stream_lag),
+                "updated_at": str(time.time()),
+            },
+        )
         maintain_health_host(r, ACCOUNT_SYNC_HEALTH_KEY, ops_profile)
     except Exception as e:
-        logger.debug("write_redis_health: %s", e)
+        logger.debug("write_legacy_health: %s", e)
 
 
 async def heartbeat_loop(app: Any) -> None:
-    """Main heartbeat: XREADGROUP → diff → write heartbeat + health."""
+    """Main heartbeat: XREADGROUP → diff → write Redis state."""
     from bifrost_worker.daemon.account_sync.stream_consumer import AccountStreamConsumer
     from bifrost_core.core.ops_lease import ops_profile_from_config
 
@@ -151,26 +136,25 @@ async def heartbeat_loop(app: Any) -> None:
     diff = app.diff_engine
     last_version = 0
     ops_profile = ops_profile_from_config(getattr(app, "_cfg", {}))
+    app._ops_profile = ops_profile
+
+    # Seed run defaults once if missing
+    if app.redis_state is not None:
+        state = rds.read_account_sync_state(app.redis_state) or {}
+        if "suspended" not in state:
+            rds.set_account_sync_run_status(app.redis_state, suspended=False, heartbeat_interval_sec=5.0)
 
     while app.running:
-        # PG can drop mid-run (CNPG failover / idle timeout). Reconnect before every cycle;
-        # do not keep advertising Redis alive=1 while account_sync_heartbeat is stale.
         if not app._ensure_pg():
-            _write_redis_health(
-                app.redis,
-                alive=False,
-                last_sync_version=last_version,
-                stream_lag=0,
-                ops_profile=ops_profile,
-            )
+            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False)
             await asyncio.sleep(2.0)
             continue
 
-        cmd = _poll_control(app.pg_conn)
+        cmd = _poll_control(app)
         if _apply_consumed_control(app, cmd, diff):
             return
 
-        suspended, interval_sec = _poll_run_status(app.pg_conn)
+        suspended, interval_sec = _poll_run_status(app)
         interval_sec = max(2.0, min(60.0, interval_sec))
 
         if suspended:
@@ -178,16 +162,9 @@ async def heartbeat_loop(app: Any) -> None:
             if await _sleep_account_sync_interruptible(app, interval_sec, diff):
                 return
             if not app._ensure_pg():
-                _write_redis_health(
-                    app.redis,
-                    alive=False,
-                    last_sync_version=last_version,
-                    stream_lag=0,
-                    ops_profile=ops_profile,
-                )
+                _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False)
                 continue
-            _write_heartbeat(app.pg_conn, last_sync_version=last_version, stream_lag=0)
-            _write_redis_health(app.redis, alive=True, last_sync_version=last_version, stream_lag=0, ops_profile=ops_profile)
+            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=True)
             continue
 
         remaining_sec = float(interval_sec)
@@ -195,7 +172,7 @@ async def heartbeat_loop(app: Any) -> None:
         while remaining_sec > 0 and app.running:
             if not app._ensure_pg():
                 break
-            cmd = _poll_control(app.pg_conn)
+            cmd = _poll_control(app)
             if _apply_consumed_control(app, cmd, diff):
                 return
             cap_ms = min(ACCOUNT_SYNC_MAX_BLOCK_MS, int(remaining_sec * 1000))
@@ -206,13 +183,7 @@ async def heartbeat_loop(app: Any) -> None:
                 break
 
         if not app._ensure_pg():
-            _write_redis_health(
-                app.redis,
-                alive=False,
-                last_sync_version=last_version,
-                stream_lag=0,
-                ops_profile=ops_profile,
-            )
+            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False)
             await asyncio.sleep(2.0)
             continue
 
@@ -234,12 +205,12 @@ async def heartbeat_loop(app: Any) -> None:
 
         stream_lag = consumer.pending_count()
         _write_heartbeat(
-            app.pg_conn,
+            app,
             last_sync_version=last_version,
             accounts_synced=diff.accounts_synced,
             positions_synced=diff.positions_synced,
             executions_synced=diff.executions_synced,
             open_orders_synced=diff.open_orders_synced,
             stream_lag=stream_lag,
+            alive=True,
         )
-        _write_redis_health(app.redis, alive=True, last_sync_version=last_version, stream_lag=stream_lag, ops_profile=ops_profile)

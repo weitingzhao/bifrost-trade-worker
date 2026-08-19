@@ -25,7 +25,8 @@ class AccountSyncDaemon:
 
     def __init__(self, cfg: dict) -> None:
         self._cfg = cfg
-        self.redis: Any = None
+        self.redis: Any = None  # redis-ib for stream input
+        self.redis_state: Any = None  # per-env redis for IPC state/control
         self.pg_conn: Any = None
         self.golden_conn: Any = None
         self.diff_engine = AccountSyncDiffEngine()
@@ -40,6 +41,15 @@ class AccountSyncDaemon:
         r = redis_lib.from_url(url, decode_responses=True)
         r.ping()
         logger.info("[AccountSync] Redis connected: %s", url.split("@")[-1] if "@" in url else url)
+        return r
+
+    def _connect_redis_state(self) -> Any:
+        from bifrost_core.persistence.redis_daemon_state import connect_daemon_state_redis
+
+        r = connect_daemon_state_redis(self._cfg)
+        if r is None:
+            raise RuntimeError("per-env redis (daemon state) unavailable")
+        logger.info("[AccountSync] Daemon state Redis connected")
         return r
 
     def _connect_pg(self) -> Any:
@@ -171,20 +181,16 @@ class AccountSyncDaemon:
             return False
 
     def _seed_run_status(self) -> None:
-        """Ensure account_sync_run_status has its single row."""
-        try:
-            with self.pg_conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO account_sync_run_status (id, suspended, heartbeat_interval_sec, updated_at) "
-                    "VALUES (1, false, 5.0, now()) ON CONFLICT (id) DO NOTHING"
-                )
-            self.pg_conn.commit()
-        except Exception as e:
-            logger.debug("seed_run_status: %s", e)
-            try:
-                self.pg_conn.rollback()
-            except Exception:
-                pass
+        """Ensure Redis account-sync state has suspended / interval defaults."""
+        from bifrost_core.persistence import redis_daemon_state as rds
+
+        if self.redis_state is None:
+            return
+        state = rds.read_account_sync_state(self.redis_state) or {}
+        if "suspended" not in state or "heartbeat_interval_sec" not in state:
+            rds.set_account_sync_run_status(
+                self.redis_state, suspended=False, heartbeat_interval_sec=5.0
+            )
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -197,6 +203,7 @@ class AccountSyncDaemon:
         logger.info("[AccountSync] IDLE → CONNECTING")
         try:
             self.redis = self._connect_redis()
+            self.redis_state = self._connect_redis_state()
         except Exception as e:
             logger.error("[AccountSync] Redis connect failed: %s", e)
             return
