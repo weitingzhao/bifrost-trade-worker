@@ -29,7 +29,7 @@ def _maintain_trading_engine_host(app: Any) -> None:
 
 
 def poll_control(app: Any) -> Optional[str]:
-    """Poll control command from sink (PostgreSQL daemon_control table when sink is postgres). Return stop/flatten or None."""
+    """Poll control command from Redis STREAM (via sink). Return stop/flatten or None."""
     if app._status_sink is None:
         return None
     if hasattr(app._status_sink, "poll_and_consume_control"):
@@ -38,7 +38,7 @@ def poll_control(app: Any) -> Optional[str]:
 
 
 def poll_run_status(app: Any) -> tuple[bool, Optional[float]]:
-    """Poll daemon_run_status from sink (suspended, heartbeat_interval_sec). interval None => use config default.
+    """Poll suspended / heartbeat_interval_sec from Redis trading state (via sink).
     Default suspended=True when no sink."""
     if app._status_sink is None:
         logger.debug("[Daemon] poll_run_status: no _status_sink → suspended=True, interval=None (default)")
