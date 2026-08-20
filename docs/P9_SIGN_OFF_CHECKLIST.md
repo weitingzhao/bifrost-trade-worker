@@ -36,8 +36,9 @@ WHERE table_schema = 'public'
 
 - [ ] Query returns **0 rows**
 - [ ] Retained Trade tables still present: `watchlist`, `ticker_related_tickers` (symbol-keyed),
-      `ticker_types`, `option_trades`, `job_bars_backfill`, `reference_us_holidays`,
+      `ticker_types`, `option_trades`, `job_bars_backfill`,
       `stock_readiness_daily`, `report_option_*`
+- [x] `reference_us_holidays` dropped (migrated to `market.us_market_holiday`)
 
 ## 3. Role lockdown
 
@@ -79,7 +80,6 @@ psql -f bifrost-platform-plugin-market-data/scripts/create_roles.sql
 ## Known deferred (not blocking P9)
 
 - M1 full ratios / short plugin ingest
-- `reference_us_holidays` → `data_ops.us_trading_calendar` migration (Trade ops holiday UI)
 - Thin Massive API compatibility shims (reader re-exports) — remove when API imports fully point at core
 - PROD/STG DB: run `p9_drop_legacy_tables.sql` + `create_roles.sql` after DEV Owner sign-off (DEV already applied 2026-07-30)
 - After DROP on any env: if `market.ticker` empty, enqueue `ticker_sync` universe job
