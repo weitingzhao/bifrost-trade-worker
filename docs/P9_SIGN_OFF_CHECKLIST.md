@@ -35,10 +35,11 @@ WHERE table_schema = 'public'
 ```
 
 - [ ] Query returns **0 rows**
-- [ ] Retained Trade tables still present: `watchlist`, `ticker_related_tickers` (symbol-keyed),
+- [ ] Retained Trade tables still present: `watchlist`,
       `ticker_types`, `option_trades`, `job_bars_backfill`,
       `stock_readiness_daily`, `report_option_*`
 - [x] `reference_us_holidays` dropped (migrated to `market.us_market_holiday`)
+- [x] `ticker_related_tickers` dropped (migrated to `market.ticker_related` / FDW)
 
 ## 3. Role lockdown
 
