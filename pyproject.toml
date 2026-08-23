@@ -4,14 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bifrost-worker"
-version = "0.1.1"
-description = "Trading daemon and Celery workers — Bifrost Trade system"
+version = "0.2.0"
+description = "Trading daemon and account sync — Bifrost Trade system"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "bifrost-core",
-    "celery[redis]>=5.3.0",
-    "flower>=2.0.0",
 ]
 
 [project.optional-dependencies]
