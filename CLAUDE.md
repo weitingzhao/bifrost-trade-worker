@@ -6,9 +6,9 @@
 
 ## 职责范围
 
-本 repo 包含所有**后台长进程和分布式任务**，分为两部分：
+本 repo 包含**交易 Daemon + Account Sync**（Celery / stocks_ib / Massive 队列已退役）。
 
-### 1. 交易 Daemon (`src/bifrost_worker/daemon/`)
+### 交易 Daemon (`src/bifrost_worker/daemon/`)
 
 GsTrading 主进程 — 单进程 asyncio，所有交易状态通过三层 FSM 驱动：
 
@@ -28,36 +28,21 @@ GsTrading 主进程 — 单进程 asyncio，所有交易状态通过三层 FSM �
 
 入口：`scripts/run_daemon.py`
 
----
+### Celery（已退役）
 
-### 2. Celery Workers (`src/bifrost_worker/celery/` + `src/bifrost_worker/data/`)
+`stocks_ib` Celery + beat + Flower 已从本 repo 移除。Polygon ingest → Market Data Plugin；IB bars → Plugin minute-bars。
 
-分布式后台任务，当前包含数据采集，未来可扩展任意 Celery 支持的异步任务：
+**Wave 4 `ops_audit_log` 保留**：不经 Celery beat。由 `bifrost-core` `_ensure_tables()` 顺带 `drop_ops_audit_log_partitions_older_than(3)`，或手动：
 
-| 子模块 | 职责 |
-|--------|------|
-| `celery/` | Celery app 初始化、beat 调度配置 |
-| `data/` | IB 历史数据回填任务 |
-
-#### Celery 队列
-
-| 队列 | 用途 | Pool | 最大实例 |
-|------|------|------|---------|
-| `stocks_ib` | IB K 线回填 | prefork | 1 |
-
-> **P7**: 4 个 `*_massive*` 队列（`stocks_massive` / `stocks_massive_high` / `options_massive` / `options_massive_high`）已退役。Polygon 数据采集由 Market Data Plugin CronJob 替代。
-
-Flower 监控 UI 端口：**5555**
-
----
+```bash
+# in bifrost-trade-core
+python scripts/db/drop_ops_audit_partitions.py --months 3
+```
 
 ## 依赖
 
 ```
 bifrost-core  ← 配置、PostgreSQL 写入层、ib_operator RPC client
-celery[redis]
-flower
-ib_insync     ← 仅 data/ib 回填任务需要
 ```
 
 ## 命令
@@ -66,10 +51,7 @@ ib_insync     ← 仅 data/ib 回填任务需要
 pip install -e ".[dev]"
 
 python scripts/run_daemon.py                   # 启动交易 daemon
-
-celery -A bifrost_worker.celery worker -Q stocks_ib
-celery -A bifrost_worker.celery beat            # 定时任务调度
-celery -A bifrost_worker.celery flower          # 监控 UI（端口 5555）
+python scripts/run_account_sync_daemon.py      # account sync
 
 pytest -m 'not ib and not db'
 ```
