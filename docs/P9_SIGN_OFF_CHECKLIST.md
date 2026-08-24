@@ -56,10 +56,9 @@ psql -f bifrost-platform-plugin-market-data/scripts/create_roles.sql
 
 ## 4. Dead Celery / Massive code
 
-- [ ] Massive ingest/gap/pool_fill modules removed or stubbed retired
-- [ ] `MASSIVE_QUEUES_DISABLED = True`; enqueue returns plugin message
-- [ ] Celery app still runs `stocks_ib` (bars backfill)
-- [ ] `tradeCeleryK8sIdealCatalog.ts` marks Massive queues **superseded by market-data-subcontractor**
+- [x] Massive ingest/gap/pool_fill modules removed or stubbed retired
+- [x] Trade Celery fully removed (Wave 5) — no `stocks_ib` / beat / Flower
+- [x] Background ingest uses Market Data Plugin (CronJob + PG-as-broker)
 
 ## 5. IB bars write path
 
@@ -71,7 +70,7 @@ psql -f bifrost-platform-plugin-market-data/scripts/create_roles.sql
 - [ ] Trade FE — Option Discovery: IV / Greeks still load for watchlist symbols
 - [ ] Trade FE — Screener: not empty solely due to schema drop
 - [ ] Stock Data Readiness: inventory reads `market.*` (no silent zeros from missing public tables)
-- [ ] Celery Ops: Massive enqueue still refused with plugin message
+- [x] Celery Ops page removed (Wave 5) — Market Data Plugin CronJobs replace Beat UI
 
 ## 7. After Owner confirms
 

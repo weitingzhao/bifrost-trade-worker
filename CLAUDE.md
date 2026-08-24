@@ -6,7 +6,7 @@
 
 ## 职责范围
 
-本 repo 包含**交易 Daemon + Account Sync**（Celery / stocks_ib / Massive 队列已退役）。
+本 repo 包含**交易 Daemon + Account Sync**（Celery / stocks_ib / Massive 队列已退役 — Wave 5）。
 
 ### 交易 Daemon (`src/bifrost_worker/daemon/`)
 
@@ -28,11 +28,11 @@ GsTrading 主进程 — 单进程 asyncio，所有交易状态通过三层 FSM �
 
 入口：`scripts/run_daemon.py`
 
-### Celery（已退役）
+### Celery（已退役 — Wave 5）
 
-`stocks_ib` Celery + beat + Flower 已从本 repo 移除。Polygon ingest → Market Data Plugin；IB bars → Plugin minute-bars。
+`stocks_ib` Celery + beat + Flower 已从本 repo 移除。Polygon ingest → Market Data Plugin；IB bars → Plugin minute-bars。后台任务统一使用 K8s CronJob + PG-as-broker + asyncio worker。
 
-**Wave 4 `ops_audit_log` 保留**：不经 Celery beat。由 `bifrost-core` `_ensure_tables()` 顺带 `drop_ops_audit_log_partitions_older_than(3)`，或手动：
+`ops_audit_log` 保留由 `bifrost-core` `_ensure_tables()` 顺带 drop 旧分区，或手动：
 
 ```bash
 # in bifrost-trade-core
