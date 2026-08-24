@@ -35,8 +35,7 @@ GsTrading 主进程 — 单进程 asyncio，所有交易状态通过三层 FSM �
 `ops_audit_log` 保留由 `bifrost-core` `_ensure_tables()` 顺带 drop 旧分区，或手动：
 
 ```bash
-# in bifrost-trade-core
-python scripts/db/drop_ops_audit_partitions.py --months 3
+# Wave 6: ops_audit_log retired — no partition drop script
 ```
 
 ## 依赖

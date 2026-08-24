@@ -9,7 +9,7 @@ description = "Trading daemon and account sync — Bifrost Trade system"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bifrost-core>=0.14.0",
+    "bifrost-core>=0.15.0",
 ]
 
 [project.optional-dependencies]
