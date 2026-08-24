@@ -89,7 +89,7 @@ async def eval_hedge(app: Any) -> None:
             }
         )
         snap_dict = app._build_snapshot_dict(snapshot, spot, cs, data_lag_ms)
-        app._status_sink.write_snapshot(snap_dict, append_history=True)
+        app._status_sink.write_snapshot(snap_dict)
 
     # 3.d. FSM apply transition to target emitted and start hedge
     app._fsm_trading.apply_transition(TradingEvent.TARGET_EMITTED, snapshot)
@@ -169,5 +169,5 @@ async def hedge(
         snap_dict = app._build_snapshot_dict(
             snapshot, spot, cs, snapshot.data_lag_ms
         )
-        app._status_sink.write_snapshot(snap_dict, append_history=True)
+        app._status_sink.write_snapshot(snap_dict)
     app._fsm_trading.apply_transition(TradingEvent.HEDGE_DONE, snapshot)

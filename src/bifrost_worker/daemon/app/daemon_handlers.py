@@ -58,11 +58,11 @@ async def handle_connected(app: Any) -> DaemonState:
             snap_dict = app._build_snapshot_dict(
                 snapshot, spot, cs, data_lag_ms
             )
-            app._status_sink.write_snapshot(snap_dict, append_history=False)
+            app._status_sink.write_snapshot(snap_dict)
     else:
         if app._status_sink:
             app._status_sink.write_snapshot(
-                app._build_heartbeat_minimal_dict(), append_history=False
+                app._build_heartbeat_minimal_dict()
             )
     logger.info("[Daemon] state=CONNECTED → RUNNING (bootstrap done)")
     return DaemonState.RUNNING
@@ -82,7 +82,7 @@ async def handle_running(app: Any) -> DaemonState:
     app._apply_run_status_transition()
     if app._status_sink:
         app._status_sink.write_snapshot(
-            app._build_heartbeat_minimal_dict(), append_history=False
+            app._build_heartbeat_minimal_dict()
         )
         if hasattr(app._status_sink, "write_daemon_heartbeat"):
             from bifrost_worker.daemon.app import control_heartbeat as _hb

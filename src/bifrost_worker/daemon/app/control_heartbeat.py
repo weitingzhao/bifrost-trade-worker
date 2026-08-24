@@ -154,7 +154,7 @@ async def _consume_one_control_command(app: Any, cmd: Optional[str]) -> bool:
         await app._refresh_accounts_data()
         app._last_accounts_refresh_ts = time.time()
         minimal = app._build_heartbeat_minimal_dict()
-        app._status_sink.write_snapshot(minimal, append_history=False)
+        app._status_sink.write_snapshot(minimal)
         if not getattr(app, "mock_hedging", True):
             await app._refresh_position_prices()
             app._contract_quote_live_initialized = True
@@ -245,13 +245,13 @@ async def heartbeat(app: Any) -> None:
                 snap_dict = app._build_snapshot_dict(
                     snapshot, spot, cs, data_lag_ms
                 )
-                app._status_sink.write_snapshot(snap_dict, append_history=False)
+                app._status_sink.write_snapshot(snap_dict)
             else:
                 logger.debug(
                     "Heartbeat: no full snapshot (spot unavailable), writing minimal status"
                 )
                 minimal = app._build_heartbeat_minimal_dict()
-                app._status_sink.write_snapshot(minimal, append_history=False)
+                app._status_sink.write_snapshot(minimal)
             if not getattr(app, "mock_hedging", True):
                 if not getattr(app, "_contract_quote_live_initialized", False):
                     try:
