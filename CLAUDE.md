@@ -1,6 +1,6 @@
 # CLAUDE.md — bifrost-trade-worker
 
-> 本项目是 bifrost-trader-engine 重构的一部分。迁移进度见 `bifrost-trade-infra/docs/MIGRATION_TRACKING.md`。
+> Legacy `bifrost-trader-engine` 已按 spine **D8**（2026-06-29）归档移出工作区。工作区事实基线见 `../AGENT_FACTS.md`。
 
 与本项目用户对话一律使用中文回复（无论用户用何种语言提问）；UI 字符串与代码标识符使用 English。
 
@@ -22,8 +22,8 @@ GsTrading 主进程 — 单进程 asyncio，所有交易状态通过三层 FSM �
 | `daemon/sink/` | 状态快照写入 PostgreSQL |
 
 **Daemon 架构约束**：
-- 不直接连接 IB，通过 Redis 读取行情（ib-edge 写入）和账户数据
-- 通过 `bifrost_core.ib_operator` RPC client 发送订单指令给 ib-edge Operator
+- 不直接连接 IB，通过 Redis 读取行情和账户数据（生产侧由 Platform IB Gateway Plugin 写入 `redis-ib`）
+- 通过 `bifrost_core.ib_operator` RPC client 发送订单指令给 IB Gateway Operator（**D10 BLOCKED — 实盘发单冻结中**）
 - 所有可配置参数通过 `bifrost_core.config` 加载
 
 入口：`scripts/run_daemon.py`
