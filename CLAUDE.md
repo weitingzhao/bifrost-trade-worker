@@ -22,8 +22,9 @@ GsTrading 主进程 — 单进程 asyncio，所有交易状态通过三层 FSM �
 | `daemon/sink/` | 状态快照写入 PostgreSQL |
 
 **Daemon 架构约束**：
-- 不直接连接 IB，通过 Redis 读取行情和账户数据（生产侧由 Platform IB Gateway Plugin 写入 `redis-ib`）
+- 不直接连接 IB，通过 Redis 读取行情和账户数据（**唯一写方**：Platform IB Gateway Plugin → `redis-ib`）
 - 通过 `bifrost_core.ib_operator` RPC client 发送订单指令给 IB Gateway Operator（**D10 BLOCKED — 实盘发单冻结中**）
+- **勿启动** `bifrost-trade-socket` 进程作 fallback（Wave 14G-F / D-14GF.4；双写=事故）
 - 所有可配置参数通过 `bifrost_core.config` 加载
 
 入口：`scripts/run_daemon.py`
