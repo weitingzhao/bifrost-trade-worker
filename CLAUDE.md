@@ -4,6 +4,19 @@
 
 与本项目用户对话一律使用中文回复（无论用户用何种语言提问）；UI 字符串与代码标识符使用 English。
 
+## 工作区定位（2026-09-06）
+
+| 项 | 值 |
+|---|---|
+| 域 / 载荷 | Trade (OLTP) · Satellite 执行载荷 · 仅 `daemon/`（Celery 已退役） |
+| 运行位置 | K3s `bifrost-{dev,stg,prod}` 的 `daemon` Deployment —— **D10：STG `replicas: 0`，PROD observe-safe**，不得扩容 |
+| 发布链 | GitHub main → `bifrost-deliver-{stg,prod}`（mirror-sync → build → rollout）；Argo `bifrost-stg/prod` 手动同步 |
+| 仓库可见性 | GitHub **PUBLIC**（12 个 repo 全部公开）—— `.env`、Secret YAML、dump、kubeconfig、账户内容永不入库 |
+| 硬边界 | D10 交易执行冻结（BLOCKED）· D13 三域边界 · 平台/业务解耦（Flywheel A/B） |
+| 事实基线 | `../AGENT_FACTS.md`（§8c 运行时与安全事实）· 规则 `../CLAUDE.md`（§8 Claude Code 运行配置） |
+
+会话请在工作区根 `/stocks` 启动（加载治理层 hooks / auto mode / 共享记忆）；运行时与安全事实以 `../AGENT_FACTS.md` §8c 为准。
+
 ## 职责范围
 
 本 repo 包含**交易 Daemon + Account Sync**（Celery / stocks_ib / Massive 队列已退役 — Wave 5）。
