@@ -15,6 +15,26 @@ logger = logging.getLogger(__name__)
 ACCOUNT_SYNC_MAX_BLOCK_MS = 1000
 ACCOUNT_SYNC_SLEEP_CHUNK_SEC = 1.0
 
+# A sync that fails on a schema or permission problem fails identically every
+# time. Without a backoff the loop retried at the heartbeat interval for five
+# hours on 2026-09-07 and wrote ~50k lines, evicting the whole 2000-entry
+# console ring buffer — the daemon destroyed the evidence of its own failure.
+SYNC_BACKOFF_BASE_SEC = 5.0
+SYNC_BACKOFF_MAX_SEC = 300.0
+SYNC_BACKOFF_MAX_SHIFT = 6
+# Full traceback on the first failure and every Nth after it; one line between.
+SYNC_TRACEBACK_EVERY = 100
+# Redis HASH values are strings; keep the stored error short.
+SYNC_ERROR_MAX_CHARS = 300
+
+
+def _sync_backoff_sec(consecutive_failures: int) -> float:
+    """Exponential backoff, capped. 0 failures means no extra delay."""
+    if consecutive_failures <= 0:
+        return 0.0
+    shift = min(consecutive_failures - 1, SYNC_BACKOFF_MAX_SHIFT)
+    return min(SYNC_BACKOFF_MAX_SEC, SYNC_BACKOFF_BASE_SEC * (2 ** shift))
+
 
 def _poll_control(app: Any) -> Optional[str]:
     """Consume one pending command from Redis STREAM."""
@@ -48,24 +68,34 @@ def _write_heartbeat(
     open_orders_synced: int = 0,
     stream_lag: int = 0,
     alive: bool = True,
+    sync_failures: int = 0,
+    last_error: str = "",
+    last_ok_ts: float = 0.0,
 ) -> None:
     r = getattr(app, "redis_state", None)
     if r is None:
         return
-    rds.write_account_sync_state(
-        r,
-        {
-            "last_ts": time.time(),
-            "last_sync_version": last_sync_version,
-            "accounts_synced": accounts_synced,
-            "positions_synced": positions_synced,
-            "executions_synced": executions_synced,
-            "open_orders_synced": open_orders_synced,
-            "stream_lag": stream_lag,
-            "alive": alive,
-            "updated_at": time.time(),
-        },
-    )
+    now = time.time()
+    fields = {
+        "last_ts": now,
+        "last_sync_version": last_sync_version,
+        "accounts_synced": accounts_synced,
+        "positions_synced": positions_synced,
+        "executions_synced": executions_synced,
+        "open_orders_synced": open_orders_synced,
+        "stream_lag": stream_lag,
+        "alive": alive,
+        # Why it is not alive. Without these, "the loop is turning" and "the
+        # sync is working" were the same bit, and 2000 straight failures read
+        # as healthy on every status surface.
+        "sync_failures": sync_failures,
+        "last_error": last_error[:SYNC_ERROR_MAX_CHARS],
+        "updated_at": now,
+    }
+    # Only a real sync sets this — a quiet loop is not a successful sync.
+    if last_ok_ts:
+        fields["last_ok_ts"] = last_ok_ts
+    rds.write_account_sync_state(r, fields)
     # Keep legacy health hash for Ops lease / older readers
     _write_legacy_health(
         app.redis,
@@ -135,6 +165,9 @@ async def heartbeat_loop(app: Any) -> None:
     consumer.ensure_group()
     diff = app.diff_engine
     last_version = 0
+    sync_failures = 0
+    last_error = ""
+    last_ok_ts = 0.0
     ops_profile = ops_profile_from_config(getattr(app, "_cfg", {}))
     app._ops_profile = ops_profile
 
@@ -146,7 +179,9 @@ async def heartbeat_loop(app: Any) -> None:
 
     while app.running:
         if not app._ensure_pg():
-            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False)
+            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False,
+                             sync_failures=sync_failures, last_error=last_error,
+                             last_ok_ts=last_ok_ts)
             await asyncio.sleep(2.0)
             continue
 
@@ -162,9 +197,14 @@ async def heartbeat_loop(app: Any) -> None:
             if await _sleep_account_sync_interruptible(app, interval_sec, diff):
                 return
             if not app._ensure_pg():
-                _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False)
+                _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False,
+                                 sync_failures=sync_failures, last_error=last_error,
+                                 last_ok_ts=last_ok_ts)
                 continue
-            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=True)
+            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0,
+                             alive=sync_failures == 0,
+                             sync_failures=sync_failures, last_error=last_error,
+                             last_ok_ts=last_ok_ts)
             continue
 
         remaining_sec = float(interval_sec)
@@ -183,7 +223,9 @@ async def heartbeat_loop(app: Any) -> None:
                 break
 
         if not app._ensure_pg():
-            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False)
+            _write_heartbeat(app, last_sync_version=last_version, stream_lag=0, alive=False,
+                             sync_failures=sync_failures, last_error=last_error,
+                             last_ok_ts=last_ok_ts)
             await asyncio.sleep(2.0)
             continue
 
@@ -195,8 +237,26 @@ async def heartbeat_loop(app: Any) -> None:
                     raise RuntimeError("golden_source connection unavailable")
                 diff.sync_all(app.golden_conn, latest)
                 last_version = int(latest.get("version") or 0)
+                if sync_failures:
+                    logger.info(
+                        "[AccountSync] sync_all recovered after %d consecutive failures",
+                        sync_failures,
+                    )
+                sync_failures = 0
+                last_error = ""
+                last_ok_ts = time.time()
             except Exception as e:
-                logger.error("[AccountSync] sync_all failed: %s", e, exc_info=True)
+                sync_failures += 1
+                last_error = f"{type(e).__name__}: {e}"
+                # One traceback is enough to diagnose; the rest is noise that
+                # evicts the ring buffer.
+                trace = sync_failures == 1 or sync_failures % SYNC_TRACEBACK_EVERY == 0
+                logger.error(
+                    "[AccountSync] sync_all failed (%d consecutive): %s",
+                    sync_failures,
+                    e,
+                    exc_info=trace,
+                )
                 try:
                     if app.golden_conn is not None:
                         app.golden_conn.rollback()
@@ -212,5 +272,16 @@ async def heartbeat_loop(app: Any) -> None:
             executions_synced=diff.executions_synced,
             open_orders_synced=diff.open_orders_synced,
             stream_lag=stream_lag,
-            alive=True,
+            # `alive` now means "the sync is working", not "the loop is turning".
+            # It stays false until a sync succeeds again.
+            alive=sync_failures == 0,
+            sync_failures=sync_failures,
+            last_error=last_error,
+            last_ok_ts=last_ok_ts,
         )
+
+        backoff = _sync_backoff_sec(sync_failures)
+        if backoff:
+            logger.debug("[AccountSync] backing off %.0fs after %d failures", backoff, sync_failures)
+            if await _sleep_account_sync_interruptible(app, backoff, diff):
+                return
