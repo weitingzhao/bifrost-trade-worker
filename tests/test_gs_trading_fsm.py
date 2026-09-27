@@ -1,4 +1,10 @@
-"""Integration tests: GsTrading with TradingFSM-driven flow (Redis edge; no IB connector)."""
+"""Integration tests: GsTrading with TradingFSM-driven flow (no IB connector, no Redis).
+
+Both account reads the daemon makes on the Redis edge are replaced with a seed,
+so these run where no Redis listens (CI). With only `_refresh_accounts_data`
+replaced, `_refresh_positions` still read 127.0.0.1:6379 and passed only on
+machines that happened to run a Redis there.
+"""
 
 import pytest
 
@@ -85,6 +91,7 @@ async def test_handle_connected_bootstraps_trading_fsm(minimal_config):
         await _seed_accounts_nvda(app)
 
     app._refresh_accounts_data = refresh  # type: ignore[method-assign]
+    app._refresh_positions = refresh  # type: ignore[method-assign]
 
     from bifrost_worker.daemon.fsm.daemon_fsm import DaemonState
 
@@ -104,6 +111,7 @@ async def test_eval_hedge_runs_without_error(minimal_config):
         await _seed_accounts_nvda(app)
 
     app._refresh_accounts_data = refresh  # type: ignore[method-assign]
+    app._refresh_positions = refresh  # type: ignore[method-assign]
 
     await app._handle_connected()
     await app._eval_hedge()
