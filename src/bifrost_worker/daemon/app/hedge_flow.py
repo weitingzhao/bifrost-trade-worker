@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 from bifrost_worker.daemon.core.logging_utils import (
     log_composite_state,
@@ -76,18 +76,16 @@ async def eval_hedge(app: Any) -> None:
         return
     log_target_position(target_shares=intent.target_shares, cs=cs)
 
-    # 3.c. Status sink: hedge_intent operation (and optional history row)
+    # 3.c. The decision goes to the daemon log (the Console's daemon stream). The sink's
+    # write_operation has been a no-op since Wave 1, so the trail used to vanish (TD-66).
+    logger.info(
+        "hedge_intent side=%s qty=%s price=%.4f state=%s",
+        approved.side,
+        approved.quantity,
+        spot,
+        cs.D.value if cs.D else None,
+    )
     if app._status_sink:
-        app._status_sink.write_operation(
-            {
-                "ts": time.time(),
-                "type": "hedge_intent",
-                "side": approved.side,
-                "quantity": approved.quantity,
-                "price": spot,
-                "state_reason": cs.D.value if cs.D else None,
-            }
-        )
         snap_dict = app._build_snapshot_dict(snapshot, spot, cs, data_lag_ms)
         app._status_sink.write_snapshot(snap_dict)
 
@@ -121,41 +119,18 @@ async def hedge(
         app._fsm_trading.apply_transition(TradingEvent.HEDGE_DONE, snapshot)
         return
 
-    def _write_op(op_type: str, state_reason: Optional[str] = None) -> None:
-        if app._status_sink:
-            app._status_sink.write_operation(
-                {
-                    "ts": time.time(),
-                    "type": op_type,
-                    "side": intent.side,
-                    "quantity": intent.quantity,
-                    "price": spot,
-                    "state_reason": state_reason or (cs.D.value if cs.D else None),
-                }
-            )
-
-    if app.paper_trade:
-        _write_op("order_sent")
-        log_order_status(
-            order_status="paper_send", side=intent.side, quantity=intent.quantity
-        )
-        logger.info(
-            "PAPER: would %s %s shares (delta=%.1f)",
-            intent.side,
-            intent.quantity,
-            cs.net_delta,
-        )
-    else:
-        logger.info(
-            "[Daemon] Simulated hedge (read-only — no IB orders): would %s %s shares (delta=%.1f)",
-            intent.side,
-            intent.quantity,
-            cs.net_delta,
-        )
-        _write_op("order_sent")
-        log_order_status(
-            order_status="mock_send", side=intent.side, quantity=intent.quantity
-        )
+    # The hedge is always simulated: the daemon has no order path (D10), and the paper and
+    # mock branches that used to sit here differed only in their log text (TD-66).
+    log_order_status(
+        order_status="simulated_send", side=intent.side, quantity=intent.quantity
+    )
+    logger.info(
+        "Simulated hedge (no IB orders): would %s %s shares at %.4f (delta=%.1f)",
+        intent.side,
+        intent.quantity,
+        spot,
+        cs.net_delta,
+    )
     app._fsm_hedge.on_order_placed()
     app._fsm_hedge.on_ack_ok()
     app.guard.record_hedge_sent()
@@ -164,7 +139,7 @@ async def hedge(
     app.store.inc_daily_hedge_count()
     app._metrics.inc_hedge_count()
     app._fsm_hedge.on_full_fill()
-    _write_op("fill")
+    logger.info("Simulated hedge filled: %s %s shares", intent.side, intent.quantity)
     if app._status_sink:
         snap_dict = app._build_snapshot_dict(
             snapshot, spot, cs, snapshot.data_lag_ms
