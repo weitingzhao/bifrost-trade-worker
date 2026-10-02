@@ -88,15 +88,6 @@ async def _run_gs_trading(app: GsTrading) -> None:
             app._status_sink.write_daemon_graceful_shutdown()
 
 
-async def _run_daemon_main(config_path: Optional[str] = None) -> None:
-    """Load config, build GsTrading, run the FSM loop."""
-    config, resolved_path = read_config(config_path)
-    config = _inject_gates_from_db_if_configured(config)
-    config = _inject_structure_from_db_if_configured(config)
-    app = GsTrading(config, config_path=resolved_path)
-    await _run_gs_trading(app)
-
-
 def run_daemon(config_path: Optional[str] = None) -> None:
     """Entry: run the gamma scalping daemon (SIGTERM/SIGINT stop).
 

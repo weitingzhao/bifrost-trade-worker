@@ -2,7 +2,7 @@
 
 import pytest
 
-from bifrost_worker.daemon.pricing.black_scholes import PY_VOLLIB_AVAILABLE, delta, gamma
+from bifrost_core.pricing.black_scholes import PY_VOLLIB_AVAILABLE, delta, gamma
 
 
 @pytest.mark.skipif(not PY_VOLLIB_AVAILABLE, reason="py_vollib not installed")
