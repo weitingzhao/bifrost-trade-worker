@@ -74,7 +74,10 @@ async def handle_running(app: Any) -> DaemonState:
         "[Daemon] state=RUNNING | Redis edge — accounts from IB Account Agent snapshot"
     )
     try:
-        from bifrost_worker.daemon.ib_edge import refresh_accounts_from_redis_edge
+        # Core's copy reads ib:account:snapshot:v1 from redis-ib, where the IB Gateway plugin
+        # writes it. The worker's own fork read the per-env Redis and found nothing on the
+        # first refresh after entering RUNNING (debt TD-04).
+        from bifrost_core.portfolio.ib_edge import refresh_accounts_from_redis_edge
 
         await refresh_accounts_from_redis_edge(app)
     except Exception as e:
