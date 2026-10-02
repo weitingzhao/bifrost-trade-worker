@@ -75,7 +75,9 @@ initContainer 与 readiness 用 `scripts/wait_for_data.py`（等 CNPG + Redis �
 ## 没有的东西
 
 - 没有 Celery、CronJob 或 PG-as-broker 任务队列；后台数据任务在 Market Data / Flex Query Plugin。
-- 不写 per-env `public.*` 的业务表；只在连上 per-env 库时跑一次 core `_ensure_tables()`（DDL 与幂等迁移），其余写入都去 Redis 或 Golden Source。
+- 不写 per-env `public.*` 的业务表，也不跑 DDL：core 0.35.0 起 `PostgreSQLSink` 连接时不再调 `_ensure_tables()` /
+  `ensure_brokerage_schema()`，锁超时也不再 `pg_terminate_backend` 别的连接（TD-45）。表只由发布的 db-init Job 建；
+  缺表时那次写入失败并记 error，daemon 不会自建。写入都去 Redis 或 Golden Source。
 
 ## 依赖
 
