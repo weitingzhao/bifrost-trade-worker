@@ -1,8 +1,9 @@
 """K8s Lease leader election — W8 of trade-k8s-native.
 
 The trading daemon is a *singleton writer* for auto-trade FSM state (R-DV3): at most
-one GsTrading process per environment may run the trading loop and send orders via
-IB Operator RPC. Dev and Prod may share TWS but must not both auto-trade.
+one GsTrading process per environment may run the trading loop. The daemon has no order
+path: under D10 hedging is simulated and only logged (see CLAUDE.md). Dev and Prod may share
+TWS but must not both auto-trade.
 
 This module mirrors ``bifrost_socket.ib.lease`` (W4) for the daemon workload:
 

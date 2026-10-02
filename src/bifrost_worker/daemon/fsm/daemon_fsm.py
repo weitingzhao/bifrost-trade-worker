@@ -1,6 +1,6 @@
 """Daemon lifecycle FSM: IDLE -> CONNECTING -> CONNECTED -> RUNNING <-> RUNNING_SUSPENDED -> STOPPING -> STOPPED.
 
-Engine uses Redis (IB Ingestor / IB Account Agent) and IB Operator RPC only; no in-process IB connection or WAITING_IB.
+Engine reads Redis (IB Gateway plugin: ticks and the account snapshot) only; no in-process IB connection, no order path, no WAITING_IB.
 
 Transition implementation (daemon_handlers.py):
 - IDLE -> CONNECTING: _handle_idle (always)
