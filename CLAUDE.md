@@ -59,19 +59,18 @@ D10 BLOCKED 期间 daemon **不得下实盘单**，代码里也没有下单路�
 - **写**（`bifrost_core.persistence.postgres.postgres_sink.PostgreSQLSink`）：
   - 交易状态快照、心跳 → per-env Redis HASH（`redis_daemon_state`；不在 PostgreSQL）。`write_operation` 是空操作。
   - `contract_quote_live`（来自 Redis 报价）→ Golden Source `raw_broker.contract_quote_live`。
-  - 账户、持仓、未成交订单、TWS 成交 → Golden Source `raw_broker.*`，**仅当未设置** `ACCOUNT_SYNC_DAEMON_ENABLED`。
-    STG / PROD 不设，由 daemon 写；DEV 设为 `1`（`overlays/dev/daemon-golden-writes-off.patch.yaml`），因为三环境共用
-    同一个 Golden Source。
+  - 账户、持仓、未成交订单、TWS 成交 → Golden Source `raw_broker.*`，**除非** `core.daemon_flags.daemon_broker_writes_off()`
+    为真（环境变量 `DAEMON_BROKER_WRITES_OFF=1`，旧名 `ACCOUNT_SYNC_DAEMON_ENABLED` 仍被认）。STG / PROD 不设，由 daemon 写；
+    DEV 设（`overlays/dev/daemon-golden-writes-off.patch.yaml`），因为三环境共用同一个 Golden Source。
 
 部署：base `replicas: 2`（Lease 热备）；DEV `replicas: 1`；STG `replicas: 0`；PROD `replicas: 2` + observe-safe。
 initContainer 与 readiness 用 `scripts/wait_for_data.py`（等 CNPG + Redis 可连）。
 
-### Account Sync daemon — `scripts/run_account_sync_daemon.py`（已停用）
+### Account Sync daemon —— 已删除（2026-10-02，TD-22）
 
-消费 `ib:account:stream:v1`（XREADGROUP）→ `diff_engine` → PostgreSQL。K8s `account-sync` Deployment 自 2026-09-08 起
-`replicas: 0`：它的 `diff_engine` 用 per-env FDW 名 `brokerage.*` 去写 Golden Source 连接（那里是 `raw_broker.*`），
-从未成功写入。重新启用前必须先修表名常量，**并**给 daemon 设 `ACCOUNT_SYNC_DAEMON_ENABLED=1`，否则两个写方互相覆盖
-（见 `bifrost-trade-infra/k8s/base/worker/manifest.yaml` 注释）。`scripts/systemd/run_account_sync_daemon.py` 只是转调。
+它从 2026-09-08 起 `replicas: 0`，且从未成功写入（`diff_engine` 用 `brokerage.*` 去写只有 `raw_broker.*` 的 Golden Source）。
+包、脚本、测试、K8s Deployment、Ops 的 unit 与联动扩容、`/account-sync/control/*` 都已删除。账户与持仓一直由 daemon 的
+`PostgreSQLSink` 写。
 
 ## 没有的东西
 
@@ -90,7 +89,6 @@ bifrost-core  ← 配置、Redis / PostgreSQL 读写层、组合模型（下限�
 make install-dev                               # 可编辑安装兄弟目录的 core 等与本 repo（见 Makefile）
 
 python scripts/run_daemon.py [config.yaml]     # 交易 daemon
-python scripts/run_account_sync_daemon.py      # account sync（已停用，见上）
 
 make test                                      # pytest -m 'not ib and not db'
 make lint                                      # ruff check .
