@@ -56,7 +56,7 @@ D10 BLOCKED 期间 daemon **不得下实盘单**，代码里也没有下单路�
   `settings` 读 `active_gate_safety_strategy_id` / `active_strategy_structure_id` 与 host account。
 - **控制**：monitor API 的 `/control/*` 写 per-env Redis 控制流，daemon 在心跳里消费（`stop`、`refresh_accounts`、
   ticker 订阅类等；`flatten` 未实现，只记 warning；`retry_ib` / `release_ib` 为空操作）。suspend / 心跳间隔也从 Redis 读。
-- **写**（`bifrost_core.persistence.postgres.postgres_sink.PostgreSQLSink`）：
+- **写**（`bifrost_core.persistence.postgres.postgres_sink.TradingDaemonSink`；core 0.39.0 前叫 `PostgreSQLSink`，TD-75）：
   - 交易状态快照、心跳 → per-env Redis HASH（`redis_daemon_state`；不在 PostgreSQL）。`write_operation` 是空操作。
   - `contract_quote_live`（来自 Redis 报价）→ Golden Source `raw_broker.contract_quote_live`。
   - 账户、持仓、未成交订单、TWS 成交 → Golden Source `raw_broker.*`，**除非** `core.daemon_flags.daemon_broker_writes_off()`
@@ -70,12 +70,12 @@ initContainer 与 readiness 用 `scripts/wait_for_data.py`（等 CNPG + Redis �
 
 它从 2026-09-08 起 `replicas: 0`，且从未成功写入（`diff_engine` 用 `brokerage.*` 去写只有 `raw_broker.*` 的 Golden Source）。
 包、脚本、测试、K8s Deployment、Ops 的 unit 与联动扩容、`/account-sync/control/*` 都已删除。账户与持仓一直由 daemon 的
-`PostgreSQLSink` 写。
+`TradingDaemonSink` 写。
 
 ## 没有的东西
 
 - 没有 Celery、CronJob 或 PG-as-broker 任务队列；后台数据任务在 Market Data / Flex Query Plugin。
-- 不写 per-env `public.*` 的业务表，也不跑 DDL：core 0.35.0 起 `PostgreSQLSink` 连接时不再调 `_ensure_tables()` /
+- 不写 per-env `public.*` 的业务表，也不跑 DDL：core 0.35.0 起 daemon 的 sink（现名 `TradingDaemonSink`）连接时不再调 `_ensure_tables()` /
   `ensure_brokerage_schema()`，锁超时也不再 `pg_terminate_backend` 别的连接（TD-45）。表只由发布的 db-init Job 建；
   缺表时那次写入失败并记 error，daemon 不会自建。写入都去 Redis 或 Golden Source。
 

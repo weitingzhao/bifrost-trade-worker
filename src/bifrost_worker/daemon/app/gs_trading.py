@@ -23,7 +23,7 @@ from bifrost_worker.daemon.fsm.trading_fsm import TradingFSM
 from bifrost_worker.daemon.market.market_data import MarketData
 from bifrost_core.portfolio.positions.position_book import PositionBook
 from bifrost_worker.daemon.guards.execution_guard import ExecutionGuard
-from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink
+from bifrost_core.persistence.postgres.postgres_sink import TradingDaemonSink
 from bifrost_core.persistence.status_sink import StatusSink
 from bifrost_core.core.realtime import create_reader_from_config
 from bifrost_core.config.startup import read_config
@@ -52,7 +52,7 @@ class GsTrading:
         self._status_sink: Optional[StatusSink] = None
         if postgres_cfg or os.environ.get("PGHOST"):
             try:
-                self._status_sink = PostgreSQLSink(config)
+                self._status_sink = TradingDaemonSink(config)
             except Exception as e:
                 logger.warning("PostgreSQL sink init failed: %s", e)
 

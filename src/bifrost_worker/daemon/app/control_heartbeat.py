@@ -6,7 +6,7 @@ import time
 from typing import Any, Optional
 
 from bifrost_core.core.ops_lease import maintain_health_host, ops_profile_from_config
-from bifrost_core.core.redis_health_keys import BIFROST_HEALTH_DAEMON_TRADING_ENGINE
+from bifrost_core.core.redis_health_keys import BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
 from bifrost_worker.daemon.fsm.daemon_fsm import DaemonState
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ def _maintain_trading_engine_host(app: Any) -> None:
         return
     cfg = getattr(app, "config", None) or getattr(app, "_config", None) or {}
     ops_profile = ops_profile_from_config(cfg)
-    maintain_health_host(r, BIFROST_HEALTH_DAEMON_TRADING_ENGINE, ops_profile)
+    maintain_health_host(r, BIFROST_HEALTH_DAEMON_STRATEGY_TRADING, ops_profile)
 
 
 def poll_control(app: Any) -> Optional[str]:
