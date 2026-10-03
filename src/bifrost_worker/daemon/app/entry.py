@@ -18,9 +18,9 @@ def _inject_gates_from_db_if_configured(config: dict) -> dict:
         return config
     try:
         import psycopg2
-        from bifrost_core.persistence.postgres.connection import _get_conn_params
+        from bifrost_core.persistence.postgres.connection import get_conn_params
         from bifrost_core.monitor.reader.gate_safety import get_active_gate_safety_strategy_id, get_gates_by_id
-        params = _get_conn_params(config)
+        params = get_conn_params(config)
         conn = psycopg2.connect(**params)
         try:
             gid = get_active_gate_safety_strategy_id(conn)
@@ -42,10 +42,10 @@ def _inject_structure_from_db_if_configured(config: dict) -> dict:
         return config
     try:
         import psycopg2
-        from bifrost_core.persistence.postgres.connection import _get_conn_params
+        from bifrost_core.persistence.postgres.connection import get_conn_params
         from bifrost_core.monitor.reader.gate_safety import get_active_strategy_structure_id
         from bifrost_core.monitor.reader.strategy import get_structure_by_id
-        params = _get_conn_params(config)
+        params = get_conn_params(config)
         conn = psycopg2.connect(**params)
         try:
             sid = get_active_strategy_structure_id(conn)
