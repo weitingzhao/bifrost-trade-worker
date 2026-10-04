@@ -26,7 +26,7 @@ from bifrost_worker.daemon.guards.execution_guard import ExecutionGuard
 from bifrost_core.persistence.postgres.postgres_sink import TradingDaemonSink
 from bifrost_core.persistence.status_sink import StatusSink
 from bifrost_core.core.realtime import create_reader_from_config
-from bifrost_core.config.startup import read_config
+from bifrost_core.config.yaml_config import read_config
 from bifrost_core.portfolio import accounts as _accounts
 from bifrost_worker.daemon.app import snapshot as _snapshot
 from bifrost_core.portfolio import symbol_position as _symbol_position

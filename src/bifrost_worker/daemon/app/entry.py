@@ -5,7 +5,7 @@ import logging
 import signal
 from typing import Any, Optional
 
-from bifrost_core.config.startup import read_config
+from bifrost_core.config.yaml_config import read_config
 from bifrost_worker.daemon.app.gs_trading import GsTrading
 from bifrost_worker.daemon.lease import get_daemon_lease_settings, run_daemon_with_lease
 

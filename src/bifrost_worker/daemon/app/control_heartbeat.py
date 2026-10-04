@@ -81,7 +81,7 @@ def ib_edge_heartbeat_fields(app: Any) -> dict:
     cfg = getattr(app, "config", None) or getattr(app, "_config", None) or {}
     try:
         from bifrost_core.config.yaml_config import get_effective_ib_config
-        from bifrost_core.monitor.integrations.daemon_ib_edge import (
+        from bifrost_core.monitor.integrations.platform_ib_gateway import (
             derive_daemon_ib_heartbeat_from_redis,
         )
 
