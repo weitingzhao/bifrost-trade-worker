@@ -92,14 +92,8 @@ def build_snapshot_dict(
         d["account_net_liquidation"] = None
         d["account_total_cash"] = None
         d["account_buying_power"] = None
-    # R-A1 multi-account: full list for monitoring (same level as 守护/对冲)
-    accounts_data = app.store.get_accounts_data()
-    d["accounts_snapshot"] = accounts_data if accounts_data else None
-    if accounts_data:
-        logger.debug(
-            "[R-A1] _build_snapshot_dict accounts_snapshot len=%s",
-            len(accounts_data),
-        )
+    # No accounts_snapshot: raw_broker.account / positions are written by account_push on change,
+    # not re-upserted from the cached list on every heartbeat.
     return d
 
 
@@ -155,8 +149,6 @@ def build_heartbeat_minimal_dict(app: Any) -> dict:
         d["account_net_liquidation"] = None
         d["account_total_cash"] = None
         d["account_buying_power"] = None
-    accounts_data = app.store.get_accounts_data()
-    d["accounts_snapshot"] = accounts_data if accounts_data else None
     return d
 
 

@@ -102,6 +102,9 @@ async def handle_running(app: Any) -> DaemonState:
                 **listener_kw,
             )
     app._heartbeat_task = asyncio.create_task(app._heartbeat())
+    from bifrost_worker.daemon.app import account_push as _account_push
+
+    app._account_push_task = asyncio.create_task(_account_push.run_push_listener(app))
     app._config_reload_task = asyncio.create_task(app._reload_config_loop())
     try:
         while app._fsm_daemon.is_running():
@@ -118,6 +121,18 @@ async def handle_stopping(app: Any) -> DaemonState:
     )
     heartbeat_task = getattr(app, "_heartbeat_task", None)
     config_reload_task = getattr(app, "_config_reload_task", None)
+    account_push_task = getattr(app, "_account_push_task", None)
+    if account_push_task is not None:
+        account_push_task.cancel()
+        try:
+            await account_push_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug("Account push task raised before cancel: %s", e)
+    writer = getattr(app, "_account_tables_writer", None)
+    if writer is not None:
+        writer.close()
     if heartbeat_task is not None:
         heartbeat_task.cancel()
         try:

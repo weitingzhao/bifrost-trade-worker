@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from bifrost_core.core.ops_lease import maintain_health_host, ops_profile_from_config
 from bifrost_core.core.redis_health_keys import BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
+from bifrost_worker.daemon.app import account_push as _account_push
 from bifrost_worker.daemon.fsm.daemon_fsm import DaemonState
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ async def _consume_one_control_command(app: Any, cmd: Optional[str]) -> bool:
         )
         await app._refresh_accounts_data()
         app._last_accounts_refresh_ts = time.time()
+        await _account_push.sync_once(app, force=True)
         minimal = app._build_heartbeat_minimal_dict()
         app._status_sink.write_snapshot(minimal)
         if not getattr(app, "mock_hedging", True):
@@ -237,6 +239,8 @@ async def heartbeat(app: Any) -> None:
         ):
             await app._refresh_accounts_data()
             app._last_accounts_refresh_ts = now_ts
+            # Failover for the ib:account:notify listener.
+            await _account_push.sync_once(app, force=True)
 
         if app._status_sink:
             result = await app._refresh_and_build_snapshot()

@@ -28,6 +28,7 @@ from bifrost_core.persistence.status_sink import StatusSink
 from bifrost_core.core.realtime import create_reader_from_config
 from bifrost_core.config.yaml_config import read_config
 from bifrost_core.portfolio import accounts as _accounts
+from bifrost_worker.daemon.app import account_push as _account_push
 from bifrost_worker.daemon.app import snapshot as _snapshot
 from bifrost_core.portfolio import symbol_position as _symbol_position
 from bifrost_worker.daemon.app import control_heartbeat as _control_heartbeat
@@ -134,8 +135,14 @@ class GsTrading:
             None  # overrides when set via monitoring
         )
         self._config_reload_interval = 30.0
-        # R-A1: 账户/持仓拉取（监控与对冲）不需每心跳拉取；每小时拉一次即可
+        # R-A1: full accounts refresh from the gateway's Redis snapshot (store for hedge evaluation,
+        # open orders, executions). raw_broker.account / positions follow ib:account:notify
+        # (account_push); this hourly refresh is their failover and force-writes them.
         self._accounts_refresh_interval_sec = 3600.0
+        self._account_tables_writer = (
+            _account_push.AccountTablesWriter(config) if self._status_sink else None
+        )
+        self._account_push_task: Optional[asyncio.Task] = None
         self._last_accounts_refresh_ts = 0.0
         self._last_positions_refresh_ts = 0.0
         # R-M6: contract_quote_live from Redis quotes (IB Ingestor)
