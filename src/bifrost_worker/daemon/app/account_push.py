@@ -89,6 +89,7 @@ class AccountTablesWriter:
         self._config = config
         self._conn: Any = None
         self._written: Dict[str, str] = {}
+        self._positions_nonempty: Dict[str, bool] = {}
         self._summary_since = time.monotonic()
         self._summary_writes = 0
         self._summary_accounts = 0
@@ -117,6 +118,22 @@ class AccountTablesWriter:
             self._conn = None
         return self._conn
 
+    def _account_id(self, account: dict) -> str:
+        return str(account.get("account_id") or account.get("account") or "").strip()
+
+    def _refuse_reason(self, account: dict) -> Optional[str]:
+        """A degraded IB read must not be stored as a flat book (TD-212)."""
+        summary = account.get("summary")
+        if not isinstance(summary, dict) or not str(summary.get("NetLiquidation") or "").strip():
+            return "summary lacks NetLiquidation"
+        aid = self._account_id(account)
+        positions = account.get("positions")
+        had_positions = self._positions_nonempty.get(aid, False)
+        empty_now = "positions" not in account or positions == []
+        if had_positions and empty_now and account.get("positions_ok") is not True:
+            return "positions went empty without a successful read"
+        return None
+
     def write(self, accounts: List[dict], *, force: bool = False) -> int:
         """Write the changed accounts (all of them with ``force``); returns how many were written."""
         from bifrost_core.core.daemon_flags import daemon_broker_writes_off
@@ -124,7 +141,18 @@ class AccountTablesWriter:
 
         if daemon_broker_writes_off():
             return 0
-        todo = list(accounts) if force else self.changed(accounts)
+        accepted: List[dict] = []
+        for account in accounts:
+            reason = self._refuse_reason(account)
+            if reason is None:
+                accepted.append(account)
+                continue
+            logger.warning(
+                "[account_push] refused %s: %s",
+                self._account_id(account) or "?",
+                reason,
+            )
+        todo = list(accepted) if force else self.changed(accepted)
         if not todo:
             return 0
         conn = self._ensure_conn()
@@ -143,9 +171,11 @@ class AccountTablesWriter:
                 self._conn = None
             return 0
         for a in todo:
-            aid = str(a.get("account_id") or a.get("account") or "").strip()
+            aid = self._account_id(a)
             if aid:
                 self._written[aid] = _fingerprint(a)
+                positions = a.get("positions")
+                self._positions_nonempty[aid] = isinstance(positions, list) and len(positions) > 0
         _observability.HEALTH.mark_raw_broker_write(len(todo))
         self._log_summary(len(todo))
         return len(todo)

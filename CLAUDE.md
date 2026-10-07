@@ -62,7 +62,7 @@ D10 BLOCKED 期间 daemon **不得下实盘单**，代码里也没有下单路�
   - 账户、持仓 → Golden Source `raw_broker.*`，**除非** `core.daemon_flags.daemon_broker_writes_off()`
     为真（环境变量 `DAEMON_BROKER_WRITES_OFF=1`，旧名 `ACCOUNT_SYNC_DAEMON_ENABLED` 仍被认）。STG / PROD 不设，由 daemon 写；
     DEV 设（`overlays/dev/daemon-golden-writes-off.patch.yaml`），因为三环境共用同一个 Golden Source。
-  - 未成交订单与 TWS 成交**实际不落库**：插件快照没有 `open_orders` / `last_execution_rows`，`refresh_accounts_from_redis_edge` 每小时 `write_open_orders([])` 会 TRUNCATE 这张表（TD-211）。
+  - 未成交订单与 TWS 成交：快照带上 `open_orders` / `last_execution_rows`（插件只读 `reqOpenOrders` / `reqExecutions` 成功之后）才写入。键不在快照里不等于空，不会 TRUNCATE `raw_broker.open_orders`（TD-211）。
 
 部署：base `replicas: 2`（Lease 热备）；DEV `replicas: 1`；STG `replicas: 0`；PROD `replicas: 2` + observe-safe。
 initContainer 与 readiness 用 `scripts/wait_for_data.py`（等 CNPG + Redis 可连）。

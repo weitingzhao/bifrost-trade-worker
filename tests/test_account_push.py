@@ -74,6 +74,25 @@ def test_failed_write_is_retried_on_the_next_push(monkeypatch):
     assert w.write([_acc("U1")]) == 1
 
 
+def test_degraded_snapshot_is_not_written(writes, caplog):
+    """TD-212: a summary without NAV, or positions emptied without positions_ok, is not stored."""
+    w = _writer()
+    bare = {"account_id": "U1", "summary": {"account": "U1"}, "positions": []}
+    with caplog.at_level("WARNING"):
+        assert w.write([bare]) == 0
+    assert writes == []
+    assert any("NetLiquidation" in r.getMessage() for r in caplog.records)
+
+    assert w.write([_acc("U1")]) == 1
+    emptied = {"account_id": "U1", "summary": {"NetLiquidation": "100"}, "positions": []}
+    assert w.write([emptied]) == 0
+    assert writes == [["U1"]]
+
+    flat = {**emptied, "positions_ok": True}
+    assert w.write([flat]) == 1
+    assert writes == [["U1"], ["U1"]]
+
+
 def test_stale_or_missing_snapshot_is_not_written():
     now = time.time()
     assert account_push.fresh_accounts(None, now) is None
