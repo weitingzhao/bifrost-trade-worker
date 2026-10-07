@@ -40,7 +40,7 @@ D10 BLOCKED 期间 daemon **不得下实盘单**，代码里也没有下单路�
 
 | 子模块 | 职责 |
 |--------|------|
-| `daemon/app/` | `entry.py`（读配置、从 DB 注入 active gate set 与 structure、K8s Lease 选主）· `gs_trading.py`（主类）· `daemon_handlers.py`（各状态处理）· `control_heartbeat.py`（心跳、控制命令）· `hedge_flow.py`（模拟对冲）· `snapshot.py` · `contract_quote_live.py` · `ticker_redis.py` |
+| `daemon/app/` | `entry.py`（读配置、从 DB 注入 active gate set 与 structure、K8s Lease 选主）· `gs_trading.py`（主类）· `daemon_handlers.py`（各状态处理）· `control_heartbeat.py`（心跳、控制命令）· `hedge_flow.py`（模拟对冲）· `snapshot.py` · `contract_quote_live.py` · `ticker_redis.py` · `observability.py`（日志配置、`/metrics` 与 `/health`）|
 | `daemon/fsm/` | `daemon_fsm.py` · `trading_fsm.py` · `hedge_fsm.py` · `events.py` |
 | `daemon/strategy/` | `gamma_scalper.py`（目标仓位 / 对冲意图）· `hedge_gate.py` |
 | `daemon/guards/` | `execution_guard.py`（冷却、日内次数、仓位 / 亏损 / 价差上限、财报黑窗）· `trading_guard.py` |
@@ -65,6 +65,12 @@ D10 BLOCKED 期间 daemon **不得下实盘单**，代码里也没有下单路�
 
 部署：base `replicas: 2`（Lease 热备）；DEV `replicas: 1`；STG `replicas: 0`；PROD `replicas: 2` + observe-safe。
 initContainer 与 readiness 用 `scripts/wait_for_data.py`（等 CNPG + Redis 可连）。
+
+日志与存活（0.2.7，TD-215 / TD-216）：`run_daemon` 第一步配置根 logger（`LOG_LEVEL`，默认 INFO，stdout 一行一条），
+之前什么都没配，INFO 全丢。`:9108`（`BIFROST_DAEMON_METRICS_PORT`，`0` 关闭）上的 `/metrics` 导出心跳与 raw_broker
+最后一次成功写入的**时间戳**（不是存活布尔值）；`/health` 只在本 Pod 持有 Lease 且心跳循环 600 秒没走时返回 503，备机永远 200。
+告警 `BifrostTradeDaemon*` 在 bifrost-trade-infra `k8s/monitoring/bifrost-alerting-rules.yaml`。写失败一律 WARNING 及以上
+（`tests/test_daemon_observability.py` 棘轮）。
 
 ### Account Sync daemon —— 已删除（2026-10-02，TD-22）
 

@@ -22,6 +22,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from bifrost_worker.daemon.app import observability as _observability
+
 logger = logging.getLogger(__name__)
 
 #: A plugin snapshot older than this is not written: the key has no TTL, so a stopped gateway
@@ -31,6 +33,9 @@ SNAPSHOT_MAX_AGE_SEC = 120.0
 MIN_SYNC_INTERVAL_SEC = 1.0
 #: Back-off before re-subscribing after a redis-ib error.
 RESUBSCRIBE_BACKOFF_SEC = 5.0
+#: At most one INFO summary of raw_broker writes per this many seconds (a write per changed
+#: account can come every second in a session; one line each would drown the log).
+WRITE_SUMMARY_INTERVAL_SEC = 600.0
 
 
 def _fingerprint(account: Dict[str, Any]) -> str:
@@ -84,6 +89,9 @@ class AccountTablesWriter:
         self._config = config
         self._conn: Any = None
         self._written: Dict[str, str] = {}
+        self._summary_since = time.monotonic()
+        self._summary_writes = 0
+        self._summary_accounts = 0
 
     def changed(self, accounts: List[dict]) -> List[dict]:
         out = []
@@ -121,12 +129,14 @@ class AccountTablesWriter:
             return 0
         conn = self._ensure_conn()
         if conn is None:
+            _observability.HEALTH.mark_raw_broker_failure()
             return 0
         try:
             sync_accounts_snapshot_to_tables(conn, todo)
             conn.commit()
         except Exception as e:
             logger.warning("[account_push] raw_broker write failed: %s", e)
+            _observability.HEALTH.mark_raw_broker_failure()
             try:
                 conn.rollback()
             except Exception:
@@ -136,7 +146,25 @@ class AccountTablesWriter:
             aid = str(a.get("account_id") or a.get("account") or "").strip()
             if aid:
                 self._written[aid] = _fingerprint(a)
+        _observability.HEALTH.mark_raw_broker_write(len(todo))
+        self._log_summary(len(todo))
         return len(todo)
+
+    def _log_summary(self, accounts: int) -> None:
+        self._summary_writes += 1
+        self._summary_accounts += accounts
+        elapsed = time.monotonic() - self._summary_since
+        if elapsed < WRITE_SUMMARY_INTERVAL_SEC:
+            return
+        logger.info(
+            "[account_push] raw_broker: %s write(s), %s account row set(s) in the last %.0fs",
+            self._summary_writes,
+            self._summary_accounts,
+            elapsed,
+        )
+        self._summary_since = time.monotonic()
+        self._summary_writes = 0
+        self._summary_accounts = 0
 
     def close(self) -> None:
         if self._conn is not None:

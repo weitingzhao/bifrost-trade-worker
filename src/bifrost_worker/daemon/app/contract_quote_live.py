@@ -81,7 +81,7 @@ def on_ticker_for_contract_key(app: Any, contract_key: str, ticker: Any) -> None
     try:
         app._status_sink.write_contract_quote_live([row])
     except Exception as e:
-        logger.debug("on_ticker_for_contract_key write_contract_quote_live %s: %s", contract_key, e)
+        logger.warning("on_ticker_for_contract_key write_contract_quote_live %s: %s", contract_key, e)
 
 
 async def init_ticker_subscriptions(app: Any) -> None:

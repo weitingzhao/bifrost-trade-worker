@@ -6,6 +6,7 @@ import signal
 from typing import Any, Optional
 
 from bifrost_core.config.yaml_config import read_config
+from bifrost_worker.daemon.app import observability
 from bifrost_worker.daemon.app.gs_trading import GsTrading
 from bifrost_worker.daemon.lease import get_daemon_lease_settings, run_daemon_with_lease
 
@@ -93,12 +94,18 @@ def run_daemon(config_path: Optional[str] = None) -> None:
 
     When ``daemon.lease.enabled`` (or ``BIFROST_DAEMON_LEASE_ENABLED``) is set, only
     the K8s Lease holder runs the FSM trading loop (R-DV3 single active auto-trade).
+
+    Logging is configured first (TD-216) and /metrics + /health are served from the start, so a
+    standby pod answers its livenessProbe too (TD-215).
     """
+    observability.configure_logging()
+    observability.start_http_server()
     config, _resolved = read_config(config_path)
     lease_settings = get_daemon_lease_settings(config)
     app_holder: dict[str, GsTrading] = {}
 
     async def _service() -> None:
+        observability.HEALTH.mark_leading()
         config_loaded, resolved_path = read_config(config_path)
         config_loaded = _inject_gates_from_db_if_configured(config_loaded)
         config_loaded = _inject_structure_from_db_if_configured(config_loaded)

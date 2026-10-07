@@ -8,6 +8,7 @@ from typing import Any, Optional
 from bifrost_core.core.ops_lease import maintain_health_host, ops_profile_from_config
 from bifrost_core.core.redis_health_keys import BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
 from bifrost_worker.daemon.app import account_push as _account_push
+from bifrost_worker.daemon.app import observability as _observability
 from bifrost_worker.daemon.fsm.daemon_fsm import DaemonState
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,9 @@ async def sleep_until_heartbeat_or_stop(app: Any, total_sec: float) -> bool:
 async def heartbeat(app: Any) -> None:
     """Periodic heartbeat: snapshot, optional hedge, status writes."""
     while app._fsm_daemon.is_running():
+        # Liveness (TD-215): one pass of this loop is the daemon's pulse; /health and
+        # bifrost_daemon_heartbeat_timestamp_seconds read it.
+        _observability.HEALTH.mark_heartbeat()
         cmd = poll_control(app)
         if await _consume_one_control_command(app, cmd):
             return
@@ -216,14 +220,16 @@ async def heartbeat(app: Any) -> None:
         suspended = apply_run_status_transition(app)
         interval_sec = effective_heartbeat_interval(app)
         state_label = app._fsm_daemon.current.value
+        # Per-pass lines are DEBUG: at the 10 s default they would be ~17k lines a day once INFO
+        # is visible (TD-216). State transitions above stay INFO.
         if suspended:
-            logger.info(
+            logger.debug(
                 "[Daemon] state=%s | heartbeat: sleep up to %.0fs (interruptible), skip maybe_hedge (suspended)",
                 state_label,
                 interval_sec,
             )
         else:
-            logger.info(
+            logger.debug(
                 "[Daemon] state=%s | heartbeat: sleep up to %.0fs (interruptible), then maybe_hedge",
                 state_label,
                 interval_sec,
@@ -262,7 +268,7 @@ async def heartbeat(app: Any) -> None:
                         await app._refresh_position_prices()
                         app._contract_quote_live_initialized = True
                     except Exception as e:
-                        logger.debug(
+                        logger.warning(
                             "R-M6 initial refresh_position_prices: %s", e
                         )
                 try:
@@ -274,7 +280,7 @@ async def heartbeat(app: Any) -> None:
                     else:
                         await app._refresh_position_prices()
                 except Exception as e:
-                    logger.debug("R-M6 contract_quote_live sync failed: %s", e)
+                    logger.warning("R-M6 contract_quote_live sync failed: %s", e)
             if hasattr(app._status_sink, "write_daemon_heartbeat"):
                 ib_kw = ib_edge_heartbeat_fields(app)
                 app._status_sink.write_daemon_heartbeat(
@@ -297,11 +303,11 @@ async def heartbeat(app: Any) -> None:
 
         if not suspended:
             if getattr(app, "mock_hedging", True):
-                logger.info(
+                logger.debug(
                     "[Daemon] state=RUNNING | Mock: skip maybe_hedge (mock_hedging=true)"
                 )
             else:
-                logger.info(
+                logger.debug(
                     "[Daemon] state=RUNNING | heartbeat: tick, running maybe_hedge"
                 )
                 await app._eval_hedge_sync()
