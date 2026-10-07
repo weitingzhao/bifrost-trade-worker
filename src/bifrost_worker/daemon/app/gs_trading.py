@@ -35,6 +35,7 @@ from bifrost_worker.daemon.app import control_heartbeat as _control_heartbeat
 from bifrost_worker.daemon.app import hedge_flow as _hedge_flow
 from bifrost_worker.daemon.app import daemon_handlers as _daemon_handlers
 from bifrost_worker.daemon.app import contract_quote_live as _contract_quote_live
+from bifrost_worker.daemon.app.quote_mirror import quote_mirror_from_config
 from bifrost_worker.daemon.app import ticker_redis as _ticker_redis
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ class GsTrading:
         self.symbol = ""
         self.paper_trade = True
         self.mock_hedging = True
+        self.quote_mirror = quote_mirror_from_config(config)
 
         # 1.d Hedge Configuration
         self._hedge_cfg = get_hedge_config(config)
@@ -181,6 +183,7 @@ class GsTrading:
         self._risk_cfg = get_risk_config(config)
         self.paper_trade = True
         self.mock_hedging = True
+        self.quote_mirror = quote_mirror_from_config(config)
         self.guard.update_config(
             cooldown_sec=self._hedge_cfg["cooldown_sec"],
             max_daily_hedge_count=self._hedge_cfg["max_daily_hedge_count"],

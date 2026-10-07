@@ -9,6 +9,7 @@ from bifrost_core.core.ops_lease import maintain_health_host, ops_profile_from_c
 from bifrost_core.core.redis_health_keys import BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
 from bifrost_worker.daemon.app import account_push as _account_push
 from bifrost_worker.daemon.app import observability as _observability
+from bifrost_worker.daemon.app.quote_mirror import observe_quote_mirror
 from bifrost_worker.daemon.fsm.daemon_fsm import DaemonState
 
 logger = logging.getLogger(__name__)
@@ -158,9 +159,7 @@ async def _consume_one_control_command(app: Any, cmd: Optional[str]) -> bool:
         await _account_push.sync_once(app, force=True)
         minimal = app._build_heartbeat_minimal_dict()
         app._status_sink.write_snapshot(minimal)
-        if not getattr(app, "mock_hedging", True):
-            await app._refresh_position_prices()
-            app._contract_quote_live_initialized = True
+        await observe_quote_mirror(app)
         return False
     if cmd == "refresh_replay" and app._status_sink:
         logger.info(
@@ -262,25 +261,7 @@ async def heartbeat(app: Any) -> None:
                 )
                 minimal = app._build_heartbeat_minimal_dict()
                 app._status_sink.write_snapshot(minimal)
-            if not getattr(app, "mock_hedging", True):
-                if not getattr(app, "_contract_quote_live_initialized", False):
-                    try:
-                        await app._refresh_position_prices()
-                        app._contract_quote_live_initialized = True
-                    except Exception as e:
-                        logger.warning(
-                            "R-M6 initial refresh_position_prices: %s", e
-                        )
-                try:
-                    if (
-                        getattr(app, "_redis_quotes_reader", None)
-                        and app._redis_quotes_reader.available
-                    ):
-                        app._sync_contract_quote_live_from_redis()
-                    else:
-                        await app._refresh_position_prices()
-                except Exception as e:
-                    logger.warning("R-M6 contract_quote_live sync failed: %s", e)
+            await observe_quote_mirror(app)
             if hasattr(app._status_sink, "write_daemon_heartbeat"):
                 ib_kw = ib_edge_heartbeat_fields(app)
                 app._status_sink.write_daemon_heartbeat(
