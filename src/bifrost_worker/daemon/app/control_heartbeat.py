@@ -9,7 +9,6 @@ from bifrost_core.core.ops_lease import maintain_health_host, ops_profile_from_c
 from bifrost_core.core.redis_health_keys import BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
 from bifrost_worker.daemon.app import account_push as _account_push
 from bifrost_worker.daemon.app import observability as _observability
-from bifrost_worker.daemon.app.quote_mirror import observe_quote_mirror
 from bifrost_worker.daemon.fsm.daemon_fsm import DaemonState
 
 logger = logging.getLogger(__name__)
@@ -159,7 +158,6 @@ async def _consume_one_control_command(app: Any, cmd: Optional[str]) -> bool:
         await _account_push.sync_once(app, force=True)
         minimal = app._build_heartbeat_minimal_dict()
         app._status_sink.write_snapshot(minimal)
-        await observe_quote_mirror(app)
         return False
     if cmd == "refresh_replay" and app._status_sink:
         logger.info(
@@ -261,7 +259,6 @@ async def heartbeat(app: Any) -> None:
                 )
                 minimal = app._build_heartbeat_minimal_dict()
                 app._status_sink.write_snapshot(minimal)
-            await observe_quote_mirror(app)
             if hasattr(app._status_sink, "write_daemon_heartbeat"):
                 ib_kw = ib_edge_heartbeat_fields(app)
                 app._status_sink.write_daemon_heartbeat(

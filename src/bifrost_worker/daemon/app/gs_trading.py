@@ -35,7 +35,6 @@ from bifrost_worker.daemon.app import control_heartbeat as _control_heartbeat
 from bifrost_worker.daemon.app import hedge_flow as _hedge_flow
 from bifrost_worker.daemon.app import daemon_handlers as _daemon_handlers
 from bifrost_worker.daemon.app import contract_quote_live as _contract_quote_live
-from bifrost_worker.daemon.app.quote_mirror import quote_mirror_from_config
 from bifrost_worker.daemon.app import ticker_redis as _ticker_redis
 
 logger = logging.getLogger(__name__)
@@ -84,7 +83,6 @@ class GsTrading:
         self.symbol = ""
         self.paper_trade = True
         self.mock_hedging = True
-        self.quote_mirror = quote_mirror_from_config(config)
 
         # 1.d Hedge Configuration
         self._hedge_cfg = get_hedge_config(config)
@@ -147,8 +145,6 @@ class GsTrading:
         self._account_push_task: Optional[asyncio.Task] = None
         self._last_accounts_refresh_ts = 0.0
         self._last_positions_refresh_ts = 0.0
-        # R-M6: contract_quote_live from Redis quotes (IB Ingestor)
-        self._contract_quote_live_initialized = False
         # Redis quotes: reader only — IB Ingestor writes ticks; daemon reads quote:/ib:ingester:tick:* (no daemon writer).
         self._redis_quotes_reader = create_reader_from_config(config)
         if getattr(self, "_redis_quotes_reader", None) and self._redis_quotes_reader.available:
@@ -183,7 +179,6 @@ class GsTrading:
         self._risk_cfg = get_risk_config(config)
         self.paper_trade = True
         self.mock_hedging = True
-        self.quote_mirror = quote_mirror_from_config(config)
         self.guard.update_config(
             cooldown_sec=self._hedge_cfg["cooldown_sec"],
             max_daily_hedge_count=self._hedge_cfg["max_daily_hedge_count"],
@@ -279,10 +274,6 @@ class GsTrading:
         """Called on each ticker update from IB for a symbol (may be from IB thread)."""
         _ticker_redis.on_ticker_for_symbol(self, symbol, ticker)
 
-    def _on_ticker_for_contract_key(self, contract_key: str, ticker: Any) -> None:
-        """Called on each ticker update from IB for an option contract (Watchlist OPT). Writes to contract_quote_live."""
-        _contract_quote_live.on_ticker_for_contract_key(self, contract_key, ticker)
-
     def _quote_payload_from_ticker(self, symbol: str, ticker: Any) -> Optional[dict]:
         """Build quote dict for Redis from ticker. Used for non-strategy symbols."""
         return _ticker_redis.quote_payload_from_ticker(symbol, ticker)
@@ -352,18 +343,6 @@ class GsTrading:
     async def _init_ticker_subscriptions(self) -> None:
         """If no subscriptions: subscribe to watchlist + all positions. Else write error to last_control_message."""
         await _contract_quote_live.init_ticker_subscriptions(self)
-
-    def _get_position_stk_instruments(self) -> dict:
-        """From accounts_data aggregate STK instruments; return contract_key -> meta."""
-        return _contract_quote_live.get_position_stk_instruments(self)
-
-    async def _refresh_position_prices(self) -> None:
-        """R-M6: fetch prices from IB and write contract_quote_live."""
-        await _contract_quote_live.refresh_position_prices(self)
-
-    def _sync_contract_quote_live_from_redis(self) -> None:
-        """R-M6: update contract_quote_live from Redis quotes."""
-        _contract_quote_live.sync_contract_quote_live_from_redis(self)
 
     # --- State handlers: each runs its logic and returns the next state ---
 
