@@ -58,7 +58,8 @@ D10 BLOCKED 期间 daemon **不得下实盘单**，代码里也没有下单路�
   ticker 订阅类等；`flatten` 未实现，只记 warning；`retry_ib` / `release_ib` 为空操作）。suspend / 心跳间隔也从 Redis 读。
 - **写**（`bifrost_core.persistence.postgres.postgres_sink.TradingDaemonSink`；core 0.39.0 前叫 `PostgreSQLSink`，TD-75）：
   - 交易状态快照、心跳 → per-env Redis HASH（`redis_daemon_state`；不在 PostgreSQL）。`write_operation` 是空操作。
-  - `contract_quote_live`（来自 Redis 报价）→ Golden Source `raw_broker.contract_quote_live`。
+  - **不写** `raw_broker.contract_quote_live`：报价镜像在 TD-240 删除，这张表已没有写入方（Owner 保留表，2026-10-08 选 B）。
+    盘中报价只在 Redis（`GET /quotes` 直接读），`daemon/app/contract_quote_live.py` 只剩 ticker 订阅控制命令的空处理。
   - 账户、持仓 → Golden Source `raw_broker.*`，**除非** `core.daemon_flags.daemon_broker_writes_off()`
     为真（环境变量 `DAEMON_BROKER_WRITES_OFF=1`，旧名 `ACCOUNT_SYNC_DAEMON_ENABLED` 仍被认）。STG / PROD 不设，由 daemon 写；
     DEV 设（`overlays/dev/daemon-golden-writes-off.patch.yaml`），因为三环境共用同一个 Golden Source。
